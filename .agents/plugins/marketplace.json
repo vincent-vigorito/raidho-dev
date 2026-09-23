@@ -1,0 +1,19 @@
+{
+  "name": "raidhodev",
+  "interface": {
+    "displayName": "raidho (dev)"
+  },
+  "plugins": [
+    {
+      "name": "raidho",
+      "source": {
+        "source": "local",
+        "path": "./plugins/raidho"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

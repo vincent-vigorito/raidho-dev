@@ -1,0 +1,43 @@
+# Config strumenti di sviluppo (pytest / ruff / coverage). Nessun packaging: raidho si distribuisce
+# come plugin (Claude Code marketplace, Codex plugin, adapter OpenCode/Grok), non come pacchetto pip.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 110
+extend-exclude = ["plugins", ".opencode", ".agents"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+# Ignorati per partire con la CI verde su 13k righe esistenti; da sciogliere a ogni release.
+extend-ignore = [
+    "E501",  # line-too-long: 317 casi (description dei tool, regex). TODO 2026-09: sciogliere per modulo
+    "E702",  # multiple-statements-on-one-line: 50 casi nei test in stile script. TODO 2026-09
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mcp_memory_server", "code_db", "code_index", "code_search", "embed_providers",
+                     "roadmap_io", "wiki_embed", "graph_report", "graph_html", "skill_parser",
+                     "context_loader", "lint_checks", "slugify", "secrets_loader", "steward",
+                     "compact_sessions", "journal_policy", "gen_tools_doc"]
+
+[tool.coverage.run]
+# ${RAIDHO_COV_ROOT} è impostato da tests/_coverage_hook/sitecustomize.py (sottoprocessi con cwd arbitrario)
+source = ["${RAIDHO_COV_ROOT}/scripts", "${RAIDHO_COV_ROOT}/hooks"]
+parallel = true
+branch = false
+omit = ["scripts/migrate_cc_memory.py", "scripts/cc_memory_to_soul.py", "scripts/cc_memory_sync.py"]
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = false
+precision = 1
+
+[tool.ruff.lint.per-file-ignores]
+# Frozen retrieval corpus: preserve source lines and hashes used in baseline reports.
+"benchmarks/retrieval/fixtures/**/*.py" = ["I001"]
+"benchmarks/retrieval/v2/fixtures/**/*.py" = ["I001"]
+"benchmarks/retrieval/calibration/fixtures/**/*.py" = ["I001"]

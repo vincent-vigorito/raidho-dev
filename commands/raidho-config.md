@@ -1,0 +1,157 @@
+---
+description: Configura interattivamente embedding provider + model per code.search (richiede restart CC dopo)
+argument-hint: [embed | show]
+allowed-tools: Read, Edit, Bash, AskUserQuestion, mcp__raidho_memory__wiki_log_append
+---
+
+# /raidho-config — Configurazione interattiva del plugin
+
+Workflow guidato per settare embed provider/model. Scrive direttamente nel `.mcp.json` del progetto (env block del server `raidho_memory`). API keys restano nella shell env / `.secrets.env` (mai scritte nel file).
+
+Argomenti: `$ARGUMENTS`
+
+Sub-command:
+- `embed` (default se vuoto) — config provider + model per ricerca semantica
+- `show` — stampa la config corrente senza modifiche
+
+## Pre-flight
+
+Verifica che `.raidhowiki/meta.yaml` esista nella cwd. Se no: "Wiki non inizializzato. Lancia `/raidho-init` prima." e termina.
+
+## Sub-command: `show`
+
+1. Leggi `.mcp.json` dalla cwd
+2. Estrai `mcpServers.raidho_memory.env`
+3. Stampa formato leggibile:
+   ```
+   raidho embed config:
+     Provider:  <RAIDHO_EMBED_PROVIDER o "openrouter (default)">
+     Model:     <RAIDHO_EMBED_MODEL o "default per provider">
+     API key:   <env var richiesta> = <"set" o "MISSING in shell env">
+   ```
+4. Per "set / MISSING" → controlla `Bash`: `[ -n "$VOYAGE_API_KEY" ] && echo set || echo MISSING` (sostituisci con la var corretta del provider scelto)
+5. Niente log entry — read-only
+
+## Sub-command: `embed` (default)
+
+### Step 1 — Scelta provider
+
+`AskUserQuestion`:
+- header: "Provider"
+- question: "Quale provider embedding vuoi usare per code.search?"
+- options:
+  - **OpenRouter (Recommended)** — 1 API key per accesso multi-provider (OpenAI/Cohere/...). Default raccomandato per setup veloce.
+  - **Voyage AI** — `voyage-code-3` è SOTA su codice ($0.06/1M token). Massima qualità per code search.
+  - **OpenAI** — diretto, modelli ben noti (`text-embedding-3-small/large`).
+  - **Local (sentence-transformers)** — offline, privacy 100%, richiede `pip install sentence-transformers` (~600MB).
+  - **None** — disabilita semantic search, solo ripgrep (level 0/1).
+
+### Step 2 — Scelta model (in base a provider)
+
+Solo se provider != none. Suggerimenti per options:
+
+**OpenRouter** (options):
+- `openai/text-embedding-3-small` (Recommended) — dim 1536, $0.02/1M
+- `openai/text-embedding-3-large` — dim 3072, $0.13/1M
+- (other) — input manuale slug OpenRouter
+
+**Voyage** (options):
+- `voyage-code-3` (Recommended) — dim 1024, ottimizzato codice, $0.06/1M
+- `voyage-3` — dim 1024, general
+- `voyage-3-lite` — dim 512, economico $0.02/1M
+
+**OpenAI** (options):
+- `text-embedding-3-small` (Recommended) — dim 1536, $0.02/1M
+- `text-embedding-3-large` — dim 3072, $0.13/1M
+
+**Local** (options):
+- `BAAI/bge-small-en` (Recommended) — dim 384, 133 MB
+- `BAAI/bge-base-en` — dim 768, 450 MB
+- `BAAI/bge-large-en` — dim 1024, 1.3 GB
+
+### Step 3 — Check API key
+
+Solo se provider != local && provider != none. Determina la env var attesa:
+- openrouter → `OPENROUTER_API_KEY`
+- voyage → `VOYAGE_API_KEY`
+- openai → `OPENAI_API_KEY`
+
+Bash check: `[ -n "$<VAR>" ] && echo set || echo MISSING`
+
+Se MISSING, dai istruzioni precise senza eseguire azioni:
+
+```
+⚠ API key '<VAR>' non trovata nella shell env.
+
+Setta in una di queste posizioni:
+  1. Shell profile (permanente):
+     echo 'export <VAR>=<your-key>' >> ~/.zshrc && source ~/.zshrc
+
+  2. Secrets file del progetto (gitignored):
+     echo '<VAR>=<your-key>' >> .secrets.env
+     # poi prima di lanciare claude:
+     source .secrets.env
+
+Dopo aver settato la key, restart CC perché il subprocess MCP rilegga l'env.
+```
+
+Se set: prosegui senza commenti, va bene.
+
+### Step 4 — Update .mcp.json
+
+Leggi `.mcp.json` con `Read`. Trova `mcpServers.raidho_memory.env`. Aggiorna:
+- `RAIDHO_EMBED_PROVIDER`: provider scelto (lowercase)
+- `RAIDHO_EMBED_MODEL`: model scelto
+
+Se provider != none && provider != local, aggiungi anche la variable substitution per la API key:
+- openrouter → `"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"`
+- voyage → `"VOYAGE_API_KEY": "${VOYAGE_API_KEY}"`
+- openai → `"OPENAI_API_KEY": "${OPENAI_API_KEY}"`
+
+Usa `Edit` per modifica chirurgica del block `env`, preservando il resto.
+
+Se la key esiste già con valore diverso: aggiornala. Se manca: aggiungila.
+
+Aggiungi anche `code` al `RAIDHO_TOOL_GROUPS` se non già presente.
+
+### Policy di invio
+
+La selezione delle credenziali non autorizza da sola l'invio dei file. Conserva le regole esistenti in `.raidhowiki/index-policy.json`. Se l'utente ha esplicitamente autorizzato il provider remoto per i contenuti del progetto, salva `remote: {"provider": "<provider scelto>", "model": "<modello scelto>"}`; altrimenti lascia l'invio disabilitato e indica la scelta ancora necessaria. Non sovrascrivere `include`, `exclude` o l'autorizzazione indipendente `rerank_model`.
+
+Dopo il restart, `/raidho-index-code --dry-run` mostra file eleggibili, esclusioni e destinazione senza rete né scritture sull'indice. Un cambio fingerprint può coinvolgere sia codice sia wiki.
+
+### Step 5 — Conferma
+
+Output user-facing:
+```
+✓ Embed config aggiornato in .mcp.json:
+  Provider: <provider>
+  Model:    <model>
+  Tool groups: <gruppi attivi, incluso 'code'>
+
+⚠ Restart Claude Code per applicare (subprocess MCP non rilegge env senza respawn):
+  - In CLI: /exit poi riapri
+  - In webapp: chiudi e riapri la chat
+
+Poi puoi:
+  /raidho-index-code        # build vector index del codebase
+  Oppure direttamente:    # chat → "trova il code che gestisce X"
+```
+
+### Step 6 — Log
+
+Chiama `mcp__raidho_memory__wiki_log_append`:
+- `type`: "decision"
+- `description`: "embed config → provider=<provider>, model=<model>"
+
+## Note
+
+- `.mcp.json` resta commitable in git: contiene solo references (`${VAR}`), non secrets
+- Cambiare fingerprint (anche modello a stessa dimensione) avvia un rebuild completo coordinato; non usare `--limit` durante la migrazione
+- L'auto-detect di `code.search` continua a funzionare: se index esiste e provider matcha → level 2, altrimenti fallback
+
+## Edge cases
+
+- `.mcp.json` mancante → errore con suggestion "Lancia `/raidho-init` (progetto nuovo) o `/raidho-upgrade` (wiki esistente)"
+- Server `raidho_memory` non in `mcpServers` → errore
+- Provider/model "other" custom → accetta free-form input via AskUserQuestion

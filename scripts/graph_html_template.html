@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>__TITLE__ — Knowledge Graph</title>
+<style>
+  :root {
+    --bg: #0f1116; --panel: #161922; --border: #2a2f3a; --text: #e6e8eb;
+    --text-dim: #8a93a3; --accent: #6aa9ff; --accent-2: #ffb547;
+    --wiki-entity: #6aa9ff; --wiki-concept: #b07cff; --wiki-source: #7cd6a3;
+    --wiki-analysis: #ffb547; --wiki-session: #888; --wiki-other: #c0c8d4;
+    --code: #ff7b7b; --orphan: #555;
+    --explicit: #6aa9ff; --semantic-strong: #a366ff;
+    --anchor: #7cd6a3;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text);
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
+  #app { display: flex; height: 100vh; }
+  #sidebar { width: 320px; min-width: 320px; background: var(--panel); border-right: 1px solid var(--border);
+             padding: 14px; overflow-y: auto; }
+  #cy { flex: 1; background: var(--bg); position: relative; overflow: hidden; }
+  #details { flex: 0 0 460px; width: 460px; min-width: 460px; background: var(--panel);
+             border-left: 1px solid var(--border);
+             padding: 14px; overflow-y: auto; display: none; }
+  #details.open { display: block; }
+  /* F-OKF-B: reader markdown nel pannello (stile compatto dark) */
+  .md-body { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border);
+             line-height: 1.55; font-size: 12.5px; }
+  .md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+    color: var(--text); text-transform: none; letter-spacing: 0; margin: 14px 0 6px 0; }
+  .md-body h1 { font-size: 14px; } .md-body h2 { font-size: 13px; } .md-body h3 { font-size: 12.5px; }
+  .md-body p { margin: 6px 0; }
+  .md-body ul, .md-body ol { margin: 6px 0; padding-left: 20px; }
+  .md-body code { background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+                  padding: 1px 4px; font-size: 11px; }
+  .md-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+                 padding: 8px 10px; overflow-x: auto; }
+  .md-body pre code { border: 0; padding: 0; background: transparent; }
+  .md-body table { border-collapse: collapse; margin: 8px 0; font-size: 11.5px; max-width: 100%; display: block; overflow-x: auto; }
+  .md-body th, .md-body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+  .md-body blockquote { border-left: 3px solid var(--border); margin: 8px 0; padding: 2px 12px; color: var(--text-dim); }
+  .md-body img { max-width: 100%; }
+  .md-body a { color: var(--accent); text-decoration: none; }
+  .md-body a:hover { text-decoration: underline; }
+  .md-body a.wiki-dead { color: var(--text-dim); border-bottom: 1px dashed var(--text-dim); cursor: default; }
+  .fm-meta { color: var(--text-dim); font-size: 11px; margin: 2px 0 8px 0; }
+  h1 { font-size: 14px; margin: 0 0 4px 0; font-weight: 600; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim);
+       margin: 16px 0 6px 0; }
+  .stats { font-size: 11px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.5; }
+  .stats span.v { color: var(--text); font-weight: 500; }
+  input[type="search"] {
+    width: 100%; padding: 7px 10px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; font: inherit;
+  }
+  input[type="search"]:focus { outline: 1px solid var(--accent); }
+  .filter-group label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+  .filter-group input[type="checkbox"] { margin: 0; }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+  .results { margin-top: 8px; max-height: 320px; overflow-y: auto; }
+  .result-item { padding: 6px 8px; border-radius: 3px; cursor: pointer; line-height: 1.4; }
+  .result-item:hover { background: var(--border); }
+  .result-item .label { font-weight: 500; }
+  .result-item .meta { color: var(--text-dim); font-size: 11px; }
+  .node-detail { line-height: 1.6; }
+  .node-detail h3 { font-size: 13px; margin: 0 0 8px 0; word-break: break-word; }
+  .node-detail .kv { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
+  .node-detail .kv .k { color: var(--text-dim); min-width: 80px; }
+  .node-detail .kv .v { word-break: break-all; }
+  .node-detail .mono { font-family: monospace; font-size: 11px; }
+  .node-detail .neighbors .item { padding: 4px 0; border-bottom: 1px dotted var(--border);
+                                  display: flex; justify-content: space-between; font-size: 12px;
+                                  cursor: pointer; }
+  .node-detail .neighbors .item:hover { color: var(--accent); }
+  .topbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border);
+            background: var(--panel); }
+  .btn { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+         padding: 5px 10px; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; }
+  .btn:hover { border-color: var(--accent); }
+  .cy-wrap { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>__TITLE__</h1>
+    <div class="stats" id="stats"></div>
+
+    <h2>Search</h2>
+    <input type="search" id="search" placeholder="Filter by name…" autocomplete="off">
+    <div id="results" class="results"></div>
+
+    <h2>Show</h2>
+    <div class="filter-group" id="filter-kind">
+      <label><input type="checkbox" value="wiki" checked> <span class="legend-dot" style="background: var(--wiki-entity);"></span> Wiki</label>
+      <label><input type="checkbox" value="code" checked> <span class="legend-dot" style="background: var(--code);"></span> Code</label>
+    </div>
+
+    <h2>Wiki type</h2>
+    <div class="filter-group" id="filter-type">
+      <label><input type="checkbox" value="entity" checked> <span class="legend-dot" style="background: var(--wiki-entity);"></span> Entity</label>
+      <label><input type="checkbox" value="concept" checked> <span class="legend-dot" style="background: var(--wiki-concept);"></span> Concept</label>
+      <label><input type="checkbox" value="source" checked> <span class="legend-dot" style="background: var(--wiki-source);"></span> Source</label>
+      <label><input type="checkbox" value="analysis" checked> <span class="legend-dot" style="background: var(--wiki-analysis);"></span> Analysis</label>
+      <label><input type="checkbox" value="session"> <span class="legend-dot" style="background: var(--wiki-session);"></span> Session</label>
+    </div>
+
+    <h2>Edges</h2>
+    <div class="filter-group" id="filter-edge">
+      <label><input type="checkbox" value="explicit" checked> <span class="legend-dot" style="background: var(--explicit);"></span> Explicit ([[wikilink]])</label>
+      <label><input type="checkbox" value="semantic" checked> <span class="legend-dot" style="background: var(--semantic-strong);"></span> Semantic</label>
+      <label><input type="checkbox" value="anchor" checked> <span class="legend-dot" style="background: var(--anchor);"></span> Wiki↔code anchor</label>
+    </div>
+  </aside>
+
+  <div class="cy-wrap">
+    <div class="topbar">
+      <button class="btn" id="layout-cose">Force</button>
+      <button class="btn" id="layout-breadthfirst">Tree</button>
+      <button class="btn" id="layout-concentric">Concentric</button>
+      <button class="btn" id="layout-circle">Circle</button>
+      <button class="btn" id="layout-grid">Grid</button>
+      <button class="btn" id="fit-btn">Fit</button>
+    </div>
+    <div id="cy"></div>
+  </div>
+
+  <aside id="details">
+    <div id="details-body"></div>
+  </aside>
+</div>
+
+<script>__VENDOR_CYTOSCAPE__</script>
+<script>__VENDOR_MARKED__</script>
+<script>__VENDOR_PURIFY__</script>
+<script>
+const DATA = __DATA__;
+const PAGES = __PAGES__;
+const stats = DATA.stats || {};
+
+function el(tag, attrs, children) {
+  const e = document.createElement(tag);
+  if (attrs) Object.entries(attrs).forEach(function(kv) {
+    if (kv[0] === 'className') e.className = kv[1];
+    else if (kv[0] === 'style' && typeof kv[1] === 'object') Object.assign(e.style, kv[1]);
+    else if (kv[0].startsWith('on') && typeof kv[1] === 'function') e[kv[0]] = kv[1];
+    else if (kv[0] === 'dataset') Object.entries(kv[1]).forEach(function(d) { e.dataset[d[0]] = d[1]; });
+    else e.setAttribute(kv[0], kv[1]);
+  });
+  if (children) children.forEach(function(c) {
+    if (c == null) return;
+    if (typeof c === 'string') e.appendChild(document.createTextNode(c));
+    else e.appendChild(c);
+  });
+  return e;
+}
+
+function clearChildren(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+// Stats display (safe: textContent only)
+const statsEl = document.getElementById('stats');
+clearChildren(statsEl);
+function statSpan(value, label) {
+  return [el('span', {className: 'v'}, [String(value)]), document.createTextNode(' ' + label)];
+}
+[
+  [stats.wiki_pages || 0, 'wiki pages'],
+  [stats.explicit_edges || 0, 'explicit'],
+  [stats.semantic_edges_strong || 0, 'semantic'],
+].forEach(function(s, i) {
+  if (i > 0) statsEl.appendChild(document.createTextNode(' · '));
+  statSpan(s[0], s[1]).forEach(function(x) { statsEl.appendChild(x); });
+});
+statsEl.appendChild(el('br'));
+[
+  [stats.wiki_code_anchors_count || 0, 'code anchors'],
+  [stats.god_nodes_count || 0, 'god nodes'],
+  [stats.orphans_count || 0, 'orphans'],
+].forEach(function(s, i) {
+  if (i > 0) statsEl.appendChild(document.createTextNode(' · '));
+  statSpan(s[0], s[1]).forEach(function(x) { statsEl.appendChild(x); });
+});
+
+const cy = cytoscape({
+  container: document.getElementById('cy'),
+  elements: { nodes: DATA.nodes, edges: DATA.edges },
+  layout: { name: 'cose', idealEdgeLength: 120, nodeRepulsion: 4000 },
+  style: [
+    { selector: 'node[kind="wiki"]', style: {
+        'background-color': function(ele) {
+          const t = ele.data('page_type') || '';
+          if (t === 'entity') return '#6aa9ff';
+          if (t === 'concept') return '#b07cff';
+          if (t === 'source') return '#7cd6a3';
+          if (t === 'analysis') return '#ffb547';
+          if (t === 'session') return '#888';
+          return '#c0c8d4';
+        },
+        'label': 'data(label)', 'color': '#e6e8eb', 'font-size': 11,
+        'text-valign': 'bottom', 'text-margin-y': 4,
+        'width': function(ele) { return Math.max(20, 12 + (ele.data('degree') || 0) * 6); },
+        'height': function(ele) { return Math.max(20, 12 + (ele.data('degree') || 0) * 6); },
+        'border-width': function(ele) { return ele.data('orphan') ? 2 : 0; },
+        'border-color': '#555', 'border-style': 'dashed',
+    }},
+    { selector: 'node[kind="code"]', style: {
+        'background-color': function(ele) {
+          // Color groups per cluster_dir (top-level directory)
+          const dir = (ele.data('cluster_dir') || '').toLowerCase();
+          if (dir.startsWith('scripts')) return '#7fffd4';
+          if (dir.startsWith('hooks')) return '#ff66d6';
+          if (dir.startsWith('commands')) return '#d6a3ff';
+          if (dir.startsWith('agents')) return '#ffd966';
+          if (dir.startsWith('skills')) return '#d4ff7f';
+          return '#ff7b7b';
+        },
+        'shape': 'ellipse',
+        'label': 'data(label)', 'color': '#bcc4d2', 'font-size': 9,
+        'text-valign': 'bottom', 'text-margin-y': 3,
+        'width': 14, 'height': 14, 'border-width': 0,
+    }},
+    { selector: 'edge[edge_kind^="code"]', style: {
+        'line-color': '#ff9d66', 'width': 1, 'opacity': 0.35, 'curve-style': 'bezier',
+    }},
+    { selector: 'edge[edge_kind="code_strong"]', style: { 'opacity': 0.55, 'width': 1.3 }},
+    { selector: '.dimmed', style: { 'opacity': 0.1 }},
+    { selector: '.focus', style: { 'opacity': 1 }},
+    { selector: 'edge.focus', style: { 'width': 2.5, 'opacity': 1 }},
+    { selector: 'edge[edge_kind="explicit"]', style: {
+        'line-color': '#6aa9ff', 'width': 1, 'opacity': 0.4, 'curve-style': 'bezier',
+    }},
+    { selector: 'edge[edge_kind="semantic_strong"]', style: {
+        'line-color': '#a366ff', 'width': 1.3, 'line-style': 'dashed', 'opacity': 0.6, 'curve-style': 'bezier',
+    }},
+    { selector: 'edge[edge_kind="semantic_medium"]', style: {
+        'line-color': '#a366ff', 'width': 1, 'line-style': 'dashed', 'opacity': 0.4, 'curve-style': 'bezier',
+    }},
+    { selector: 'edge[edge_kind="semantic_weak"]', style: {
+        'line-color': '#a366ff', 'width': 0.8, 'line-style': 'dashed', 'opacity': 0.2, 'curve-style': 'bezier',
+    }},
+    { selector: 'edge[edge_kind^="anchor"]', style: {
+        'line-color': '#7cd6a3', 'width': 1, 'line-style': 'dotted', 'opacity': 0.5, 'curve-style': 'bezier',
+    }},
+    { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#ffb547', 'border-style': 'solid' }},
+  ],
+});
+
+function applyLayout(name) {
+  cy.layout({ name: name, idealEdgeLength: 120, nodeRepulsion: 4000, animate: true, animationDuration: 600 }).run();
+}
+document.getElementById('layout-cose').onclick = function() { applyLayout('cose'); };
+document.getElementById('layout-breadthfirst').onclick = function() { applyLayout('breadthfirst'); };
+document.getElementById('layout-concentric').onclick = function() { applyLayout('concentric'); };
+document.getElementById('layout-circle').onclick = function() { applyLayout('circle'); };
+document.getElementById('layout-grid').onclick = function() { applyLayout('grid'); };
+document.getElementById('fit-btn').onclick = function() { cy.fit(undefined, 30); };
+
+function applyFilters() {
+  const kindEnabled = new Set(Array.from(document.querySelectorAll('#filter-kind input:checked')).map(function(c) { return c.value; }));
+  const typeEnabled = new Set(Array.from(document.querySelectorAll('#filter-type input:checked')).map(function(c) { return c.value; }));
+  const edgeEnabled = new Set(Array.from(document.querySelectorAll('#filter-edge input:checked')).map(function(c) { return c.value; }));
+
+  cy.nodes().forEach(function(n) {
+    const k = n.data('kind');
+    let visible = kindEnabled.has(k);
+    if (k === 'wiki') {
+      const t = n.data('page_type') || 'entity';
+      visible = visible && (typeEnabled.has(t) || typeEnabled.size === 0);
+    }
+    n.style('display', visible ? 'element' : 'none');
+  });
+  cy.edges().forEach(function(e) {
+    const ek = e.data('edge_kind') || '';
+    let visible = false;
+    if (ek === 'explicit') visible = edgeEnabled.has('explicit');
+    else if (ek.startsWith('semantic')) visible = edgeEnabled.has('semantic');
+    else if (ek.startsWith('anchor')) visible = edgeEnabled.has('anchor');
+    if (visible && (e.source().style('display') === 'none' || e.target().style('display') === 'none')) visible = false;
+    e.style('display', visible ? 'element' : 'none');
+  });
+}
+document.querySelectorAll('#filter-kind input, #filter-type input, #filter-edge input').forEach(function(el) {
+  el.addEventListener('change', applyFilters);
+});
+applyFilters();
+
+const searchEl = document.getElementById('search');
+const resultsEl = document.getElementById('results');
+
+function buildResultItem(n) {
+  const item = el('div', {className: 'result-item', onclick: function() { focusNode(n); }}, [
+    el('div', {className: 'label'}, [n.data('label') || '']),
+    el('div', {className: 'meta'}, [(n.data('kind') || '') + ' · ' + (n.data('page_type') || n.data('lang') || '')]),
+  ]);
+  return item;
+}
+
+function updateResults() {
+  const q = searchEl.value.trim().toLowerCase();
+  clearChildren(resultsEl);
+  if (!q) return;
+  const matches = cy.nodes().filter(function(n) {
+    const label = (n.data('label') || '').toLowerCase();
+    const id = (n.data('id') || '').toLowerCase();
+    return label.includes(q) || id.includes(q);
+  });
+  matches.slice(0, 20).forEach(function(n) { resultsEl.appendChild(buildResultItem(n)); });
+}
+searchEl.addEventListener('input', updateResults);
+
+function focusNode(n) {
+  cy.nodes().unselect();
+  n.select();
+  cy.animate({ center: { eles: n }, zoom: 1.5 }, { duration: 500 });
+  showDetails(n);
+}
+
+function kvRow(label, value, mono) {
+  return el('div', {className: 'kv'}, [
+    el('span', {className: 'k'}, [label]),
+    el('span', {className: 'v' + (mono ? ' mono' : '')}, [String(value)]),
+  ]);
+}
+
+// F-OKF-B: wikilink [[slug]] / [[slug|label]] / [[slug#sec]] → link markdown
+// interni (#wiki/slug), navigati DENTRO il viewer invece che come file path.
+const WIKILINK_RE = /\[\[([^\]|#\s]+)(#[^\]|]+)?(\|[^\]]+)?\]\]/g;
+
+function preprocessWikilinks(md) {
+  return md.replace(WIKILINK_RE, function(m, slug, sec, label) {
+    const text = label ? label.slice(1) : slug;
+    return '[' + text + '](#wiki/' + encodeURIComponent(slug) + ')';
+  });
+}
+
+// Gli ID nodo/pagina hanno prefisso tipo ('concepts:rest-thin-architecture'),
+// i wikilink nei body usano lo slug nudo: stessa risoluzione di
+// graph_report._slug_to_target, lato client.
+const SLUG_INDEX = {};
+(function() {
+  const ids = new Set(Object.keys(PAGES));
+  DATA.nodes.forEach(function(n) { if (n.data.kind === 'wiki') ids.add(n.data.id); });
+  ids.forEach(function(id) {
+    SLUG_INDEX[id] = id;
+    const bare = id.split(':').pop();
+    if (!(bare in SLUG_INDEX)) SLUG_INDEX[bare] = id;
+  });
+})();
+
+function resolveSlug(slug) { return SLUG_INDEX[slug] || null; }
+
+function navigateToSlug(slug) {
+  const id = resolveSlug(slug);
+  if (!id) return;
+  const node = cy.getElementById(id);
+  if (node.length) { focusNode(node); return; }
+  // pagina senza nodo nel grafo (es. filtrata): reader-only se il body c'è
+  if (PAGES[id]) showBySlug(id);
+}
+
+function renderMdBody(md) {
+  const container = el('div', {className: 'md-body'});
+  if (!md || typeof marked === 'undefined') return container;
+  let html = marked.parse(preprocessWikilinks(md));
+  if (typeof DOMPurify !== 'undefined') html = DOMPurify.sanitize(html);
+  container.innerHTML = html;
+  container.querySelectorAll('a').forEach(function(a) {
+    const href = a.getAttribute('href') || '';
+    if (href.indexOf('#wiki/') === 0) {
+      const slug = decodeURIComponent(href.slice(6));
+      if (!resolveSlug(slug)) {
+        a.className = 'wiki-dead';            // knowledge not-yet-written
+        a.removeAttribute('href');
+        return;
+      }
+      a.onclick = function(ev) { ev.preventDefault(); navigateToSlug(slug); };
+    } else if (/^https?:\/\//.test(href)) {
+      a.target = '_blank'; a.rel = 'noopener';
+    } else {
+      a.removeAttribute('href');              // path relativi: inerti nel viewer
+    }
+  });
+  return container;
+}
+
+function neighborItem(nb) {
+  const scoreLabel = nb.score !== undefined && nb.score !== null ? nb.score.toFixed(2) : '';
+  return el('div', {className: 'item', onclick: function() {
+    const node = cy.getElementById(nb.id);
+    if (node.length) focusNode(node);
+  }}, [
+    el('span', null, [nb.label || nb.id || '']),
+    el('span', {style: {color: 'var(--text-dim)'}}, [scoreLabel]),
+  ]);
+}
+
+function neighborSection(title, items) {
+  if (!items.length) return null;
+  const s = el('div', {className: 'neighbors'}, [el('h2', null, [title + ' (' + items.length + ')'])]);
+  items.forEach(function(nb) { s.appendChild(neighborItem(nb)); });
+  return s;
+}
+
+function buildPanel(d, page, edgeSections) {
+  const fm = (page && page.fm) || {};
+  const metaBits = [];
+  if (d.page_type || (page && page.page_type)) metaBits.push(d.page_type || page.page_type);
+  if (fm.updated) metaBits.push('agg. ' + fm.updated);
+  if (fm.status && fm.status !== 'stable') metaBits.push(fm.status);
+  if (fm.tags) metaBits.push(fm.tags.replace(/[\[\]]/g, ''));
+
+  const detail = el('div', {className: 'node-detail'}, [
+    el('h3', null, [fm.title || d.label || d.id || '']),
+    metaBits.length ? el('div', {className: 'fm-meta'}, [metaBits.join(' · ')]) : null,
+    d.file_path ? kvRow('file', d.file_path, true) : null,
+    d.func_name ? kvRow('func', d.func_name, true) : null,
+    d.degree !== undefined ? kvRow('degree', (d.incoming || 0) + ' in · ' + (d.outgoing || 0) + ' out') : null,
+    d.cluster ? kvRow('cluster', d.cluster) : null,
+    d.orphan ? kvRow('status', 'orphan') : null,
+  ]);
+  (edgeSections || []).forEach(function(s) { if (s) detail.appendChild(s); });
+  if (page && page.body) detail.appendChild(renderMdBody(page.body));
+  return detail;
+}
+
+function showDetails(n) {
+  const details = document.getElementById('details');
+  const body = document.getElementById('details-body');
+  const d = n.data();
+
+  // Split OKF-style: citazioni esplicite separate dai vicini semantici
+  const citedBy = [], linksTo = [], related = [];
+  n.connectedEdges().forEach(function(e) {
+    const isSource = e.source().id() === n.id();
+    const other = isSource ? e.target() : e.source();
+    const nb = { label: other.data('label'), id: other.data('id'),
+                 score: e.data('score'), edge_kind: e.data('edge_kind') };
+    if (nb.edge_kind === 'explicit') (isSource ? linksTo : citedBy).push(nb);
+    else related.push(nb);
+  });
+  related.sort(function(a, b) { return (b.score || 0) - (a.score || 0); });
+
+  clearChildren(body);
+  body.appendChild(buildPanel(d, PAGES[d.id], [
+    neighborSection('Citato da', citedBy),
+    neighborSection('Linka', linksTo),
+    neighborSection('Correlati', related),
+  ]));
+  details.classList.add('open');
+  details.scrollTop = 0;
+  requestAnimationFrame(function() { cy.resize(); });
+}
+
+// Reader-only: pagina presente in PAGES ma senza nodo nel grafo corrente
+function showBySlug(slug) {
+  const details = document.getElementById('details');
+  const body = document.getElementById('details-body');
+  const page = PAGES[slug];
+  clearChildren(body);
+  body.appendChild(buildPanel({id: slug, label: slug, page_type: page.page_type}, page, []));
+  details.classList.add('open');
+  details.scrollTop = 0;
+  requestAnimationFrame(function() { cy.resize(); });
+}
+
+cy.on('tap', 'node', function(evt) { showDetails(evt.target); });
+cy.on('tap', function(evt) {
+  if (evt.target === cy) {
+    document.getElementById('details').classList.remove('open');
+    requestAnimationFrame(function() { cy.resize(); });
+  }
+});
+
+// Obsidian-style hover-focus: highlight nodo + neighbors, dim del resto
+let hoverTimeout = null;
+cy.on('mouseover', 'node', function(evt) {
+  if (hoverTimeout) clearTimeout(hoverTimeout);
+  const n = evt.target;
+  const neighborhood = n.closedNeighborhood();
+  cy.elements().addClass('dimmed');
+  neighborhood.removeClass('dimmed').addClass('focus');
+});
+cy.on('mouseout', 'node', function() {
+  if (hoverTimeout) clearTimeout(hoverTimeout);
+  hoverTimeout = setTimeout(function() {
+    cy.elements().removeClass('dimmed focus');
+  }, 100);
+});
+</script>
+</body>
+</html>

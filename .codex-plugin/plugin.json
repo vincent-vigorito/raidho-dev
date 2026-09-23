@@ -1,0 +1,40 @@
+{
+  "name": "raidho",
+  "version": "0.31.0",
+  "description": "Wiki strutturato + memoria identitaria + ricerca semantica del codice. MCP server (memory/wiki/roadmap/sessions/skills/code/graph) + skills + lifecycle hooks (context injection a SessionStart, journal a SessionEnd, wiki re-embed a PostToolUse). Stesso core del plugin Claude Code, distribuito come plugin Codex.",
+  "author": {
+    "name": "Vincent Vigorito",
+    "email": "vvigorito@vigesrl.it"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": {
+    "raidho_memory": {
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/mcp_memory_server.py"
+      ],
+      "env": {
+        "RAIDHO_TOOL_GROUPS": "memory,sessions,soul,user,skills,wiki,roadmap,code,graph"
+      }
+    },
+    "raidho_code": {
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/mcp_code_server.py"
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "raidho",
+    "category": "Productivity",
+    "shortDescription": "Memoria di progetto e ricerca del codice con fonti verificabili",
+    "longDescription": "Wiki strutturato + memoria identitaria + ricerca semantica del codice. MCP server (memory/wiki/roadmap/sessions/skills/code/graph) + skills + lifecycle hooks (context injection a SessionStart, journal a SessionEnd, wiki re-embed a PostToolUse). Stesso core del plugin Claude Code, distribuito come plugin Codex.",
+    "developerName": "Vincent Vigorito",
+    "defaultPrompt": "Cerca nel progetto e nel wiki, citando fonti e revisioni e dichiarando i limiti delle evidenze.",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

@@ -6,15 +6,16 @@ from pathlib import Path
 
 import pytest
 from _helpers import cov_env
-from test_embed_mock import sqlite_vec_usable
+from test_embed_mock import redis_usable
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 PYTHON = os.environ.get('RAIDHO_TEST_PYTHON', sys.executable)
-pytestmark = pytest.mark.skipif(not sqlite_vec_usable(), reason='sqlite-vec unavailable')
+pytestmark = pytest.mark.skipif(not redis_usable(), reason='Redis with vector sets unavailable')
 
 DRIVER = r"""
-import json, os, sqlite3, subprocess, sys
+import json, os, sqlite3, subprocess, sys, atexit
 from pathlib import Path
+os.environ.setdefault('RAIDHO_VECTOR_REDIS', 'redis://127.0.0.1:6379/15')
 sys.path.insert(0, sys.argv[1])
 import code_db, index_pipeline, project_recovery, roadmap_io, upgrade_triade
 from raidho import trust
@@ -40,29 +41,29 @@ os.environ['RAIDHO_EMBED_PROVIDER'] = 'mock'
 os.environ['RAIDHO_EMBED_MODEL'] = ''
 os.environ['RAIDHO_WIKI_EMBED'] = '0'
 
-# SQL contract from code_db.py at e5604f1: cosine + kind, no fingerprint/manifests.
+# SQL contract from code_db.py at e5604f1: cosine + kind, no fingerprint/manifests
+# (senza la tabella vec0: il nuovo indice su Redis non la legge).
+_r = code_db._redis()
+atexit.register(lambda: [_r.delete(k) for k in _r.scan_iter(code_db.base_key(root / '.raidhowiki') + '*')])
 database = root / '.raidhowiki/code-index.db'
 db = sqlite3.connect(database)
-code_db._ensure_sqlite_vec(db)
 db.executescript('''
 CREATE TABLE chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL,
  func_name TEXT, line_start INTEGER, line_end INTEGER, content TEXT NOT NULL,
  lang TEXT, last_modified TEXT, content_sha TEXT, kind TEXT NOT NULL DEFAULT 'code',
  UNIQUE(file_path,line_start,line_end));
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding float[3] distance_metric=cosine);
 ''')
 db.executemany('INSERT INTO meta VALUES (?,?)', [('embed_dim','3'),('embed_metric','cosine'),('last_indexed_sha','legacy-checkpoint')])
 for number, (path, content, kind) in enumerate([('auth.py', 'legacy code', 'code'), (str(page), 'legacy wiki', 'wiki')], 1):
     db.execute('INSERT INTO chunks(id,file_path,line_start,line_end,content,kind) VALUES (?,?,1,1,?,?)', (number,path,content,kind))
-    db.execute('INSERT INTO chunk_vec(rowid,embedding) VALUES (?,?)', (number, code_db._serialize_vec([1.,2.,3.])))
 db.commit()
 db.close()
 def published():
     db = sqlite3.connect(database)
-    code_db._ensure_sqlite_vec(db)
     try:
-        return {t: db.execute('SELECT * FROM ' + t + ' ORDER BY 1').fetchall() for t in ('chunks','chunk_vec','meta')}
+        return {**{t: db.execute('SELECT * FROM ' + t + ' ORDER BY 1').fetchall() for t in ('chunks','meta')},
+                'redis_built': code_db.exists(root / '.raidhowiki')}
     finally:
         db.close()
 legacy = published()
@@ -74,6 +75,7 @@ assert len(roadmap_io.list_tasks(roadmap_io.parse_roadmap(roadmap))) == 3
 child = r'''
 import os, sys
 from pathlib import Path
+os.environ.setdefault('RAIDHO_VECTOR_REDIS', 'redis://127.0.0.1:6379/15')
 sys.path.insert(0, sys.argv[1])
 import code_db, index_pipeline, project_recovery, roadmap_io, upgrade_triade
 from raidho import persistence
@@ -91,11 +93,11 @@ if mode.startswith('roadmap'):
     persistence.os.replace = stop
     roadmap_io.write_roadmap(roadmap, roadmap_io.parse_roadmap(roadmap))
 elif mode == 'index':
-    real = code_db.upsert_chunk
+    real = code_db.attributi
     def stop(*args, **kwargs):
         real(*args, **kwargs)
         os._exit(73)
-    code_db.upsert_chunk = stop
+    code_db.attributi = stop
     index_pipeline.refresh(root, kind='code')
 elif mode == 'restore':
     real = project_recovery.os.rename
@@ -131,9 +133,7 @@ if mode != 'clean':
         except ValueError:
             pass
     current = published()
-    assert current['chunks'] == legacy['chunks']
-    assert current['chunk_vec'] == legacy['chunk_vec']
-    assert dict(current['meta']).get('index_fingerprint') is None
+    assert current == legacy and not current['redis_built']
 
 # Retry the complete supported sequence, then repeat it to check stable identities.
 for attempt in range(2):
@@ -158,11 +158,10 @@ for attempt in range(2):
     assert json.loads((root / '.raidhowiki/config.json').read_text()) == config
     assert (root/'AGENTS.src.md').read_bytes() == original['AGENTS.src.md']
     assert (root/'SOUL.md').read_bytes() == original['SOUL.md']
-    db = sqlite3.connect(database)
-    assert {r[0] for r in db.execute('SELECT DISTINCT kind FROM indexed_files')} == {'code','wiki'}
-    fingerprint = json.loads(dict(db.execute('SELECT * FROM meta'))['index_fingerprint'])
-    assert fingerprint['pipeline'] == code_db.PIPELINE_VERSION
-    db.close()
+    idx = code_db.open_db(root / '.raidhowiki', create_if_missing=False, allow_dimension_mismatch=True)
+    assert {k for k, _p in code_db.manifest(idx)} == {'code','wiki'}
+    assert json.loads(code_db.get_meta(idx, 'index_fingerprint'))['pipeline'] == code_db.PIPELINE_VERSION
+    assert not database.exists()
     if attempt == 0:
         ids = [t['id'] for t in tasks]
         migrated = roadmap.read_bytes()

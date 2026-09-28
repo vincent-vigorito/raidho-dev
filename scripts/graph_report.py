@@ -126,11 +126,7 @@ def _compute_code_graph(
     """
     from pathlib import Path as _P
 
-    rows = db.execute(
-        "SELECT id, file_path, func_name, line_start, line_end, lang FROM chunks "
-        "WHERE kind = 'code' LIMIT ?",
-        (limit,),
-    ).fetchall()
+    rows = code_db.list_chunks(db, kind="code", limit=limit)
 
     if granularity == "file":
         # 1 nodo per file_path
@@ -292,7 +288,7 @@ def build_report(
     embed_providers = _load("embed_providers")
 
     raidhowiki = root / ".raidhowiki"
-    if not (raidhowiki / "code-index.db").exists():
+    if not code_db.exists(raidhowiki):
         return {"error": "index not built — run wiki.embed (and code.reindex) first"}
 
     try:

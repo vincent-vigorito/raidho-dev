@@ -70,14 +70,9 @@ def enqueue(root, path, start=True, retry_failed=False):
 def enqueue_scan(root):
     root = Path(root).resolve()
     paths = set(index_pipeline.discover(root, 'wiki'))
-    index = root / '.raidhowiki/code-index.db'
-    if index.exists():
-        db = sqlite3.connect(index.as_uri() + '?mode=ro', uri=True)
-        try:
-            paths.update(Path(r[0]) for r in db.execute("SELECT DISTINCT file_path FROM chunks WHERE kind='wiki'")
-                         if '/sessions/' not in r[0])
-        finally:
-            db.close()
+    if code_db.exists(root / '.raidhowiki'):
+        idx = code_db.open_db(root / '.raidhowiki', create_if_missing=False, allow_dimension_mismatch=True)
+        paths.update(Path(p) for _k, p in code_db.file_chunk_ids(idx, 'wiki') if '/sessions/' not in p)
     for path in sorted(paths):
         enqueue(root, path, start=False)
     launch(root)

@@ -85,10 +85,10 @@ def test_missing_git_fails_closed_for_ignore_rules(tmp_path, monkeypatch):
 
 
 def test_policy_applies_to_provider_payload_and_removes_old_vectors(tmp_path):
-    from test_embed_mock import sqlite_vec_usable
+    from test_embed_mock import redis_usable
     from test_index_pipeline import run
-    if not sqlite_vec_usable():
-        pytest.skip('sqlite-vec unavailable')
+    if not redis_usable():
+        pytest.skip('Redis with vector sets unavailable')
     run(tmp_path, r'''
 (root / 'credentials.py').write_text('NEVER_SEND_SECRET')
 (root / '.raidhoignore').write_text('b.py\n')
@@ -109,10 +109,10 @@ assert len(seen) == 1 and 'incremental = 33' in seen[0]
 
 
 def test_policy_change_stops_next_batch_before_sending(tmp_path):
-    from test_embed_mock import sqlite_vec_usable
+    from test_embed_mock import redis_usable
     from test_index_pipeline import run
-    if not sqlite_vec_usable():
-        pytest.skip('sqlite-vec unavailable')
+    if not redis_usable():
+        pytest.skip('Redis with vector sets unavailable')
     run(tmp_path, r'''
 seen = []
 original = p.embed
@@ -129,10 +129,10 @@ assert contents() == before
 
 
 def test_migration_preview_includes_both_scopes_without_mutating_db(tmp_path):
-    from test_embed_mock import sqlite_vec_usable
+    from test_embed_mock import redis_usable
     from test_index_pipeline import run
-    if not sqlite_vec_usable():
-        pytest.skip('sqlite-vec unavailable')
+    if not redis_usable():
+        pytest.skip('Redis with vector sets unavailable')
     run(tmp_path, r'''
 import index_policy
 result = refresh(dry_run=True)
@@ -181,8 +181,9 @@ def test_state_symlink_cannot_write_outside_project(tmp_path, monkeypatch):
 
 
 def test_vector_query_cannot_probe_remote_without_policy(tmp_path, monkeypatch):
+    import code_db
     import code_search
-    write(tmp_path, '.raidhowiki/code-index.db', '')
+    monkeypatch.setattr(code_db, 'exists', lambda *_: True)
     monkeypatch.setenv('RAIDHO_EMBED_PROVIDER','openrouter')
     monkeypatch.setenv('RAIDHO_EMBED_MODEL','unknown-model')
     monkeypatch.setattr(embed_providers, 'get_provider', lambda: pytest.fail('unauthorized constructor'))

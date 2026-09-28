@@ -11,7 +11,7 @@ PROTO_VERSION = "2024-11-05"
 SERVER_NAME = "raidho_memory"
 
 
-SERVER_VERSION = "0.31.0"
+SERVER_VERSION = "0.32.0"
 
 
 SCOPE = os.environ.get("RAIDHO_SCOPE", "project")  # project | hub | agent

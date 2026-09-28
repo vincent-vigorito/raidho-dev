@@ -22,7 +22,6 @@
 │   ├── config.json             ← config plugin (memory budget, ecc.)
 │   ├── meta.yaml               ← identità del progetto (token, name, type)
 │   ├── CLAUDE.md               ← manuale operativo del wiki per LLM agent
-│   ├── code-index.db           ← sqlite-vec store opzionale (gitignored)
 │   ├── .steward.lock / .steward-last / .steward-pending.json   ← stato dello steward (ignorabili)
 │   ├── .steward/runs/*.json    ← audit dei run dello steward (ignorabili, ritenzione 200)
 │   ├── raw/                    ← fonti immutabili (mai modificate da agent)
@@ -239,7 +238,7 @@ Un consumatore esterno può assumere quanto segue per schema-version `1.0`:
 
 ### Pubblicazione dell'indice codice/wiki (pipeline 3)
 
-`code-index.db` conserva `indexed_files(kind, file_path, snapshot)` e `index_runs(id, kind, status, started, finished, pid, error, details)`. Lo snapshot contiene hash, dimensione, mtime e motivo di esclusione. Chunk, vettori, manifesto e metadati di completamento sono pubblicati nella stessa transazione; i tentativi falliti restano diagnosticabili senza cancellare l'ultimo indice valido. Lo staging `.index-stage-*` è temporaneo e ricostruibile.
+L'indice vive su Redis 8 (Vector Sets), non su disco: sotto `raidhodev:idx:<hash di .raidhowiki>` ci sono il vector set (`:vec`, attributi `kind`/`lang`), i chunk (`:chunks`), il manifesto dei file (`:files`, snapshot con hash, dimensione, mtime e motivo di esclusione), i chunk per file (`:filechunks`), i metadati (`:meta`) e l'ultima run per scope (`:run:<kind>`). L'incrementale si pubblica in un MULTI/EXEC sotto WATCH dei metadati, la ricostruzione su chiavi `:new:*` scambiate con RENAME: chi cerca non vede mai un indice a meta' e un tentativo fallito non tocca l'ultimo indice valido. I file cambiati durante l'embedding restano col contenuto precedente (stato `stale`, `moved_files`) e li riprende il giro successivo. Un vecchio `code-index.db` si importa una volta senza nuovi embedding se la sua copia su Redis era allineata.
 
 La pipeline 3 corregge i riferimenti oltre EOF per file terminati da newline. Il passaggio dalla pipeline 2 richiede rebuild completo; fino al rebuild la ricerca vettoriale usa il fallback dichiarato.
 

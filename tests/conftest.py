@@ -1,5 +1,10 @@
 """Optional CI gate: a skipped test must not silently certify a release."""
+import os
+
 import pytest
+
+# l'indice semantico vive su Redis: i test usano un db a parte, mai quello dei progetti (14)
+os.environ.setdefault("RAIDHO_VECTOR_REDIS", "redis://127.0.0.1:6379/15")
 
 
 def pytest_addoption(parser):

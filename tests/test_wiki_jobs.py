@@ -1,9 +1,9 @@
 """Job persistenti, dedup e recovery con SQLite/vec reale in subprocess."""
 import pytest
-from test_embed_mock import sqlite_vec_usable
+from test_embed_mock import redis_usable
 from test_index_pipeline import run
 
-pytestmark = pytest.mark.skipif(not sqlite_vec_usable(), reason='sqlite-vec extension unavailable')
+pytestmark = pytest.mark.skipif(not redis_usable(), reason='Redis with vector sets unavailable')
 
 
 def test_dedup_supersede_and_return_to_previous_content(tmp_path):

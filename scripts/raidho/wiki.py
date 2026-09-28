@@ -155,7 +155,7 @@ def _wiki_vector_search(query, type_filter, limit, include_sessions):
     if provider is None:
         return [], "no embed provider (set RAIDHO_EMBED_PROVIDER + API key)"
     raidhowiki = ROOT / ".raidhowiki"
-    if not (raidhowiki / "code-index.db").exists():
+    if not code_db.exists(raidhowiki):
         return [], "vector index not built (run wiki.embed / code.reindex)"
     db = None
     try:
@@ -271,7 +271,7 @@ def tool_wiki_search_hybrid(args: dict) -> dict:
 def tool_wiki_find_duplicates(args: dict) -> dict:
     """🔎 Trova coppie di pagine wiki semanticamente troppo simili (candidati duplicati
     / da fondere, o potenzialmente contraddittorie) via gli embeddings condivisi
-    (code-index.db). Vede ciò che il match esatto NON vede (es. 'auth-service' vs
+    (indice semantico su Redis). Vede ciò che il match esatto NON vede (es. 'auth-service' vs
     'authentication'). Complementa il lint.
 
     args: threshold (default 0.85 similarity coseno), types (lista page_type, default
@@ -300,7 +300,7 @@ def tool_wiki_find_duplicates(args: dict) -> dict:
     if provider is None:
         return {"error": "no embed provider available (set RAIDHO_EMBED_PROVIDER + API key)"}
     raidhowiki = ROOT / ".raidhowiki"
-    if not (raidhowiki / "code-index.db").exists():
+    if not code_db.exists(raidhowiki):
         return {"error": "vector index not built — run wiki.embed / code.reindex first"}
     try:
         db = code_db.open_db(raidhowiki, dim=provider.dim, create_if_missing=False, provider=provider)

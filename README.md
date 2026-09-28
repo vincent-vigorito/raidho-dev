@@ -2,13 +2,13 @@
 
 > Trasforma qualunque progetto software in una **knowledge base self-maintained + memoria identitaria + ricerca semantica del codice**, gestita end-to-end dall'agent dentro Claude Code.
 
-**Stato**: v0.31.0 — disponibile su GitHub; CI verde, prove di upgrade negli host ancora da completare. Plugin CLI standalone. License MIT.
+**Stato**: v0.32.0 — disponibile su GitHub; CI verde, prove di upgrade negli host ancora da completare. Plugin CLI standalone. License MIT.
 
 ## Cosa fa, in 7 punti
 
 1. **Wiki strutturato per progetto** in `.raidhowiki/wiki/` (entities, concepts, sources, analysis, sessions) mantenuto dall'agent via tool MCP CRUD + lint + rename + backlinks.
 2. **Memoria identitaria** in 4 layer: wiki semantico + user profile + soul agent + sessions journal.
-3. **Ricerca semantica del codice** (`code.search`): hybrid 3-livelli (ripgrep → LLM rerank → vector embedding sqlite-vec). Provider pluggable (OpenRouter default, Voyage AI, OpenAI, local sentence-transformers). Description con trigger prescrittivi USE/SKIP così l'agent sceglie autonomamente vs `Grep` in base alla natura della query (semantica/concettuale → code.search, nome esatto → Grep).
+3. **Ricerca semantica del codice** (`code.search`): hybrid 3-livelli (ripgrep → LLM rerank → vector embedding su Redis 8 Vector Sets). Provider pluggable (OpenRouter default, Voyage AI, OpenAI, local sentence-transformers). Description con trigger prescrittivi USE/SKIP così l'agent sceglie autonomamente vs `Grep` in base alla natura della query (semantica/concettuale → code.search, nome esatto → Grep).
 4. **Roadmap task come 4° file speciale**: `roadmap.md` con priority/owner/est, 6 tool MCP, slash command `/raidho-task`, focus top-5 P0/P1 al SessionStart per continuity multi-agent.
 5. **Auto-summary di sessione** in background allo SessionEnd (subprocess detached, non blocca `/exit`).
 6. **Skill management 3-livelli** (v0.8.0): SKILL.md con frontmatter strutturato in `.raidhowiki/skills/<slug>/`, discovery multi-source (project + user-global + plugin), progressive disclosure (`skill.list` → `skill.load` → `skill.read_file`), e write-side agent-managed (`skill.save / patch / edit / delete / write_file / remove_file`) per memoria procedurale persistente. Catalog Level 0 auto-iniettato al SessionStart.
@@ -21,7 +21,7 @@
 - Claude Code CLI
 - Python 3.9+ (CI su 3.9 / 3.10 / 3.12, macOS e Linux). Per la ricerca vettoriale serve un interprete che carichi estensioni sqlite: il Python di sistema macOS **non** lo fa → `brew install python@3.12`
 - `ripgrep` (`rg`) per ricerca lessicale e fallback: `brew install ripgrep` su macOS, `sudo apt-get install ripgrep` su Debian/Ubuntu.
-- (Opzionale per code search) `pip install sqlite-vec httpx`
+- (Opzionale per code search) Redis 8 (Vector Sets) + `pip install redis httpx`
 
 ### Install via marketplace
 
@@ -327,7 +327,7 @@ Esposti via stdio, filtrabili via env `RAIDHO_TOOL_GROUPS` (9 gruppi: `memory`, 
 | `code.compare_decision` | Compare a Markdown decision and selected current source files against an explicit full Git commit ID. |
 | `code.inspect` | Inspect current Python source or explicit Markdown implementation declarations after code.search. |
 | `code.search` | 🔎 CODE.SEARCH: ricerca nel codebase del progetto ospitante. |
-| `code.reindex` | 🔎 CODE: build/refresh vector index per il codebase del progetto in `.raidhowiki/code-index.db`. |
+| `code.reindex` | 🔎 CODE: build/refresh dell'indice semantico del codebase (su Redis). |
 | `code.status` | 🔎 CODE: stato del vector index del codebase. |
 
 ### Gruppo `graph` (8 tool)
@@ -470,7 +470,7 @@ Il layout `.raidhowiki/` è un **contratto pubblico** descritto in [`SCHEMA.md`]
 
 ## Filosofia
 
-- **Stdlib first**: nessuna dipendenza esterna obbligatoria per il core (sqlite-vec + httpx opzionali per code search).
+- **Stdlib first**: nessuna dipendenza esterna obbligatoria per il core (Redis + httpx opzionali per code search).
 - **MCP-first**: ogni capability via tool stdio, token-controlled via `RAIDHO_TOOL_GROUPS`.
 - **Edit minimali**: tre righe simili > astrazione prematura.
 - **Niente commenti ovvi**: solo "perché" non ovvi.
@@ -518,7 +518,7 @@ python3 scripts/release_check.py            # versioni, conteggi, test raccoglib
 
 Suite: `test_registry` (TOOLS ↔ gruppi ↔ handler ↔ nomi wire), `test_mcp_smoke` (ogni tool del
 registry chiamato sul wire, copertura obbligatoria), `test_embed_mock` (pipeline embedding con
-`RAIDHO_EMBED_PROVIDER=mock`; skip se sqlite-vec non è caricabile), `test_code_server` (sandbox di
+`RAIDHO_EMBED_PROVIDER=mock`; skip se Redis con i Vector Sets non è raggiungibile, db 15), `test_code_server` (sandbox di
 `execute_python`), `test_steward`, `test_journal_policy`, `test_compact_sessions`, `test_core_split`,
 adapter Codex/OpenCode. La CI (`.github/workflows/ci.yml`) esegue tutto su 3.9/3.10/3.12 ×
 ubuntu/macos, più ruff, i check di coerenza e la coverage (sottoprocessi inclusi) con soglia.
@@ -526,7 +526,7 @@ ubuntu/macos, più ruff, i check di coerenza e la coverage (sottoprocessi inclus
 ### Convenzioni codice
 
 - Python 3.9+: typing moderno (`X | None`, `list[T]`) va bene grazie a `from __future__ import annotations` in testa a ogni file
-- Solo stdlib nel core. Eccezioni motivate: `sqlite-vec`, `httpx` (opt-in per code search)
+- Solo stdlib nel core. Eccezioni motivate: `redis`, `httpx` (opt-in per code search)
 - File <1000 LOC: il server è un package (`scripts/raidho/`), un modulo per dominio; `TOOLS` di ogni modulo porta gli schemi dei suoi tool e `raidho.server` li aggrega in `MODULE_ORDER` (= ordine sul wire)
 - Niente `except Exception: pass` muto: usa `log_exc("modulo.funzione", exc)` da `raidho.config` (visibile con `RAIDHO_LOG=debug`)
 - Tool MCP: handler `def tool_<group>_<name>(args: dict) -> dict`, return JSON-serializable, errors come `{"error": "msg", "hint": "..."}`

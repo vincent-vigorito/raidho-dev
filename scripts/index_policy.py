@@ -158,27 +158,19 @@ def discover(root, kind='code', include_sessions=False, single=None):
 def preview(root, kind='code', include_sessions=False, single=None):
     from index_pipeline import snapshot_file
     root = Path(root).resolve()
-    import sqlite3
     from types import SimpleNamespace
 
     from project_diagnostics import provider
 
     import code_db
     settings = provider()
-    database = root / '.raidhowiki/code-index.db'
     migration = False
-    if database.is_symlink():
-        raise PolicyError('index database must not be a symlink')
-    if database.is_file():
-        db = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
-        try:
-            rows = dict(db.execute('SELECT key,value FROM meta'))
-            expected = code_db.fingerprint(SimpleNamespace(name=settings['provider'], model=settings['model'], dim=settings['dimension']))
-            migration = rows.get('index_fingerprint') != expected
-            if migration:
-                include_sessions = include_sessions or any('/wiki/sessions/' in row[0] for row in db.execute("SELECT file_path FROM chunks WHERE kind='wiki'"))
-        finally:
-            db.close()
+    if code_db.exists(root / '.raidhowiki'):
+        idx = code_db.open_db(root / '.raidhowiki', create_if_missing=False, allow_dimension_mismatch=True)
+        expected = code_db.fingerprint(SimpleNamespace(name=settings['provider'], model=settings['model'], dim=settings['dimension']))
+        migration = code_db.get_meta(idx, 'index_fingerprint') != expected
+        if migration:
+            include_sessions = include_sessions or any('/wiki/sessions/' in p for _k, p in code_db.file_chunk_ids(idx, 'wiki'))
     scopes = ('code','wiki') if migration else (kind,)
     files, excluded = [], []
     for scope in scopes:

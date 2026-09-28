@@ -1,4 +1,4 @@
-"""Q3: regressioni reali SQLite/vec, isolate dal progetto e senza rete."""
+"""Q3: regressioni reali sull'indice Redis (db di test, chiavi per progetto), senza rete."""
 import os
 import subprocess
 import sys
@@ -6,19 +6,23 @@ from pathlib import Path
 
 import pytest
 from _helpers import cov_env
-from test_embed_mock import sqlite_vec_usable
+from test_embed_mock import redis_usable
 
 PYTHON = os.environ.get("RAIDHO_TEST_PYTHON", sys.executable)
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-pytestmark = pytest.mark.skipif(not sqlite_vec_usable(), reason="sqlite-vec extension unavailable")
+pytestmark = pytest.mark.skipif(not redis_usable(), reason="Redis with vector sets unavailable")
 
 SETUP = r'''
-import sys, json, os
+import sys, json, os, atexit, struct
 from pathlib import Path
 from unittest.mock import patch
+os.environ.setdefault('RAIDHO_VECTOR_REDIS', 'redis://127.0.0.1:6379/15')
 sys.path.insert(0, sys.argv[1])
 import code_db, code_index, index_pipeline as pipeline
 root = Path(sys.argv[2])
+_r = code_db._redis()
+_base = code_db.base_key(root / '.raidhowiki')
+atexit.register(lambda: [_r.delete(k) for k in _r.scan_iter(_base + '*')])
 os.environ['RAIDHO_EMBED_PROVIDER'] = 'mock'
 (root / '.raidhowiki/wiki/concepts').mkdir(parents=True)
 (root / 'a.py').write_text('value = 1\n')
@@ -38,12 +42,22 @@ def refresh(**kwargs):
     return pipeline.refresh(root, kind='code', **kwargs)
 
 def contents():
-    db = code_db.open_db(root / '.raidhowiki', dim=p.dim, allow_dimension_mismatch=True)
-    try:
-        return {table: [tuple(r) for r in db.execute('SELECT * FROM ' + table + ' ORDER BY 1')]
-                for table in ('chunks', 'chunk_vec', 'indexed_files', 'meta')}
-    finally:
-        db.close()
+    """Lo stato pubblicato: chunk come le vecchie righe SQL (id, file_path, func_name,
+    line_start, line_end, content, lang, last_modified, content_sha, kind)."""
+    idx = code_db.open_db(root / '.raidhowiki', dim=p.dim, allow_dimension_mismatch=True)
+    chunks = []
+    for field, raw in _r.hscan_iter(idx.k('chunks'), count=1000):
+        c = json.loads(raw)
+        chunks.append((int(field), c['file_path'], c['func_name'], c['line_start'], c['line_end'], c['content'],
+                       c['lang'], c['last_modified'], c['content_sha'], c['kind']))
+    chunks.sort()
+    vec = []
+    for cid, *_ in chunks:
+        v = code_db.get_embedding_vector(idx, cid)
+        vec.append((cid, struct.pack(f'{len(v)}f', *v) if v else None))
+    return {'chunks': chunks, 'chunk_vec': vec,
+            'indexed_files': sorted((k, p_, json.dumps(i, sort_keys=True)) for (k, p_), i in code_db.manifest(idx).items()),
+            'meta': sorted(idx.meta().items())}
 assert refresh()['status'] == 'ready'
 assert pipeline.refresh(root, kind='wiki')['status'] == 'ready'
 before = contents()
@@ -92,8 +106,7 @@ try:
     code_db.open_db(root / '.raidhowiki', dim=p.dim, create_if_missing=False, provider=p)
 except RuntimeError: pass
 else: raise AssertionError('incompatible vectors accepted')
-original = code_db.upsert_chunk
-with patch.object(code_db, 'upsert_chunk', side_effect=RuntimeError('publish interrupted')):
+with patch.object(code_db, 'attributi', side_effect=RuntimeError('publish interrupted')):
     r = refresh()
 assert r['status'] == 'failed', r
 assert contents() == before
@@ -129,30 +142,37 @@ assert pipeline.index_status(root, p)['status'] == 'ready'
 ''')
 
 
-def test_filesystem_race_does_not_publish_snapshot(tmp_path):
+def test_filesystem_race_publishes_the_rest(tmp_path):
     run(tmp_path, r'''
 original = p.embed
 def race(texts):
     (root / 'a.py').write_text('changed while embedding = True\n')
+    (root / 'c.py').write_text('created while embedding = True\n')
     return original(texts)
 p.embed = race
-r = refresh(force=True)
-assert r['status'] == 'stale', r
-assert contents() == before
+(root / 'b.py').write_text('other = 22\n')
+r = refresh()
+assert r['status'] == 'stale' and r['moved_files'] == ['a.py', 'c.py'], r
+chunks = {row[1]: row for row in contents()['chunks'] if row[-1] == 'code'}
+assert 'other = 22' in str(chunks['b.py']) and 'changed while' not in str(chunks['a.py']) and 'c.py' not in chunks, chunks
 assert pipeline.index_status(root, p)['status'] == 'stale'
+p.embed = original
+assert refresh()['status'] == 'ready'
+chunks = {row[1]: row for row in contents()['chunks'] if row[-1] == 'code'}
+assert 'changed while' in str(chunks['a.py']) and 'created while' in str(chunks['c.py']), chunks
 ''')
 
 
 def test_publish_failure_rolls_back_chunk_deletions(tmp_path):
     run(tmp_path, r'''
-original = code_db.upsert_chunk
+original = code_db.attributi
 calls = 0
 def fail(*args, **kwargs):
     global calls
     calls += 1
     if calls == 2: raise RuntimeError('disk failure')
     return original(*args, **kwargs)
-with patch.object(code_db, 'upsert_chunk', side_effect=fail):
+with patch.object(code_db, 'attributi', side_effect=fail):
     assert refresh(force=True)['status'] == 'failed'
 assert contents() == before
 assert refresh(force=True)['status'] == 'ready'
@@ -202,6 +222,7 @@ def test_process_death_during_publication_recovers_previous_index(tmp_path):
 import subprocess
 child = """
 import sys, os
+os.environ.setdefault('RAIDHO_VECTOR_REDIS', 'redis://127.0.0.1:6379/15')
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 import code_db, index_pipeline as pipeline
@@ -209,11 +230,14 @@ class P:
     name='test'; model='one'; dim=3
     def embed(self, texts): return [[9.,2.,3.] for t in texts]
 pipeline.embed_providers.get_provider = P
-original = code_db.upsert_chunk
+calls = [0]
+original = code_db.attributi
 def crash(*args, **kwargs):
-    original(*args, **kwargs)
-    os._exit(71)
-code_db.upsert_chunk = crash
+    calls[0] += 1
+    if calls[0] == 2:
+        os._exit(71)
+    return original(*args, **kwargs)
+code_db.attributi = crash
 pipeline.refresh(Path(sys.argv[2]), kind='code', force=True)
 """
 r = subprocess.run([sys.executable, '-c', child, sys.argv[1], str(root)], timeout=20)
@@ -255,8 +279,7 @@ import code_search
 assert code_search.search_level_2('value', root)['level'] == 2
 (root / 'a.py').write_text('fresh_keyword = 123\n')
 r = code_search.search_level_2('fresh_keyword', root)
-assert r['level'] == 0 and r['index_status'] == 'stale', r
-assert r['results'] and r['_fallback_reason'], r
+assert r['level'] == 2 and r['index_status'] == 'stale' and r['_note'], r
 assert refresh()['status'] == 'ready'
 p.model = 'new'
 r = code_search.search_level_2('fresh_keyword', root)
@@ -269,9 +292,7 @@ assert refresh()['status'] == 'ready'
 def test_legacy_fingerprint_requires_successful_full_rebuild(tmp_path):
     run(tmp_path, r'''
 db = code_db.open_db(root / '.raidhowiki', dim=3)
-db.execute("DELETE FROM meta WHERE key='index_fingerprint'")
-db.commit()
-db.close()
+_r.hdel(db.k('meta'), 'index_fingerprint')
 before = contents()
 original = p.embed
 p.embed = lambda texts: []
@@ -335,7 +356,6 @@ assert result['evidence']['preview_chars'] <= 5
 assert all(h['evidence']['freshness'] == 'verified_at_read' for h in result['results'])
 (root / 'a.py').write_text('new_keyword = 999\n')
 result = code_search.code_search('new_keyword', smart_level=2, root=root)
-assert result['level'] == 0 and result['index_status'] == 'stale'
-assert result['evidence']['status'] == 'literal_evidence'
-assert result['results'][0]['path'] == 'a.py'
+assert result['level'] == 2 and result['index_status'] == 'stale', result
+assert not any(h['path'] == 'a.py' for h in result['results']), result
 ''')

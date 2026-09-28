@@ -3,8 +3,8 @@
 wiki.embed → find_duplicates / search_semantic → code.reindex / code.search L2 →
 graph.semantic_neighbors / graph.report / graph.html. Nessuna rete.
 
-Richiede sqlite-vec e un interprete che carichi estensioni sqlite (il Python di sistema
-macOS non lo fa): altrimenti il test è SKIP. Override interprete: RAIDHO_TEST_PYTHON."""
+Richiede Redis 8 con i Vector Sets (RAIDHO_VECTOR_REDIS, default db 15 per i test) e il
+modulo redis: altrimenti il test è SKIP. Override interprete: RAIDHO_TEST_PYTHON."""
 from __future__ import annotations
 
 import json
@@ -34,15 +34,18 @@ def check(label: str, cond: bool, detail: str = "") -> None:
         print(f"  ✗ {label} {detail}")
 
 
-def sqlite_vec_usable() -> bool:
-    probe = ("import sqlite3, sqlite_vec; c = sqlite3.connect(':memory:'); "
-             "c.enable_load_extension(True); sqlite_vec.load(c); print('ok')")
+TEST_REDIS = os.environ.get("RAIDHO_VECTOR_REDIS", "redis://127.0.0.1:6379/15")
+
+
+def redis_usable() -> bool:
+    probe = (f"import sys, os; os.environ['RAIDHO_VECTOR_REDIS'] = {TEST_REDIS!r}; sys.path.insert(0, {str(PLUGIN / 'scripts')!r}); "
+             "import code_db; print('ok' if code_db.redis_ok() else 'no')")
     r = subprocess.run([PY, "-c", probe], capture_output=True, text=True, timeout=30)
     return r.returncode == 0 and "ok" in r.stdout
 
 
 def rpc(project: Path, calls: list[tuple[str, dict]]) -> list[dict]:
-    env = {"RAIDHO_SCOPE": "project", "RAIDHO_ROOT": str(project), "RAIDHO_EMBED_PROVIDER": "mock",
+    env = {"RAIDHO_SCOPE": "project", "RAIDHO_ROOT": str(project), "RAIDHO_EMBED_PROVIDER": "mock", "RAIDHO_VECTOR_REDIS": TEST_REDIS, "RAIDHO_WIKI_EMBED": "0",
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(project.parent), **cov_env()}
     msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
     for i, (name, args) in enumerate(calls, start=2):
@@ -69,8 +72,8 @@ def rpc(project: Path, calls: list[tuple[str, dict]]) -> list[dict]:
 
 
 def main() -> None:
-    if not sqlite_vec_usable():
-        print(f"SKIP: sqlite-vec non utilizzabile con {PY} (pip install sqlite-vec + Python con load_extension)")
+    if not redis_usable():
+        print(f"SKIP: Redis con Vector Sets non raggiungibile ({TEST_REDIS})")
         return
     tmp = Path(tempfile.mkdtemp(prefix="raidho-embed-"))
     project = tmp / "proj"
@@ -98,7 +101,7 @@ def main() -> None:
         ("wiki.embed", {"force": True}),
         ("wiki.find_duplicates", {"threshold": 0.5, "types": ["concept"]}),
         ("wiki.search_semantic", {"query": "login utente session token password", "k": 3, "min_score": -1}),
-        ("code.reindex", {"force": True}),
+        ("code.reindex", {"force": True, "wait": True}),
         ("code.status", {}),
         ("code.search", {"query": "authenticate user login token", "smart_level": 2, "limit": 3}),
         ("graph.semantic_neighbors", {"source": "auth-service", "k": 3, "min_score": -1}),
@@ -135,31 +138,41 @@ def main() -> None:
     gs = json.dumps(by["graph.search_text"])
     check("graph.search_text cross-kind trova billing", "error" not in by["graph.search_text"] and "billing" in gs, gs[:300])
 
-    print("§4 metrica coseno + migrazione DB legacy (L2)")
+    print("§4 import del vecchio code-index.db senza nuovi embedding")
     probe = r"""
-import sqlite3, sys, struct
+import sqlite3, sys, os, json, hashlib, struct
+os.environ["RAIDHO_VECTOR_REDIS"] = sys.argv[3]
 sys.path.insert(0, sys.argv[1])
 import code_db
 from pathlib import Path
 root = Path(sys.argv[2]); root.mkdir()
-# DB legacy: tabella vec senza metrica (L2), come creata prima della v0.27
-db = sqlite3.connect(str(root / "code-index.db")); code_db._ensure_sqlite_vec(db)
-db.executescript("CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL, func_name TEXT, line_start INTEGER, line_end INTEGER, content TEXT NOT NULL, lang TEXT, last_modified TEXT, content_sha TEXT, kind TEXT NOT NULL DEFAULT 'code'); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding float[3]);")
-db.execute("INSERT INTO meta VALUES ('embed_dim','3')")
-f = lambda v: struct.pack('3f', *v)
-db.execute("INSERT INTO chunks(id, file_path, content) VALUES (1, 'a.py', 'a')"); db.execute("INSERT INTO chunk_vec(rowid, embedding) VALUES (1, ?)", (f([1, 0, 0]),))
-db.execute("INSERT INTO chunks(id, file_path, content) VALUES (2, 'b.py', 'b')"); db.execute("INSERT INTO chunk_vec(rowid, embedding) VALUES (2, ?)", (f([0.6, 0.8, 0]),))
+f = root / "code-index.db"
+db = sqlite3.connect(str(f))
+db.executescript("CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL, func_name TEXT, line_start INTEGER, line_end INTEGER, content TEXT NOT NULL, lang TEXT, last_modified TEXT, content_sha TEXT, kind TEXT NOT NULL DEFAULT 'code'); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE indexed_files (kind TEXT, file_path TEXT, snapshot TEXT);")
+db.executemany("INSERT INTO meta VALUES (?,?)", [("embed_dim","3"), ("index_fingerprint","fp"), ("index_generation","4"), ("code_index_state","ready")])
+db.execute("INSERT INTO chunks(id, file_path, content, lang) VALUES (1, 'a.py', 'a', 'python')")
+db.execute("INSERT INTO chunks(id, file_path, content, lang) VALUES (2, 'b.py', 'b', 'python')")
+db.executemany("INSERT INTO indexed_files VALUES ('code',?,?)", [("a.py", json.dumps({"hash": "ha"})), ("b.py", json.dumps({"hash": "hb"}))])
 db.commit(); db.close()
-db = code_db.open_db(root, dim=3)
-res = code_db.vector_search(db, [1.0, 0.0, 0.0], limit=2)
-print(code_db.get_meta(db, "embed_metric"), code_db.get_meta(db, "embed_metric_migrated_rows"), [(r["id"], round(r["distance"], 3)) for r in res])
+r = code_db._redis()
+old = "raidhodev:vec:" + hashlib.sha1(str(f).encode()).hexdigest()[:16]
+r.delete(old)
+r.execute_command("VADD", old, "FP32", struct.pack("3f", 1, 0, 0), "1")
+r.execute_command("VADD", old, "FP32", struct.pack("3f", 0.6, 0.8, 0), "2")
+r.set(old + ":versione", "fp|4")
+idx = code_db.open_db(root, dim=3)
+res = code_db.vector_search(idx, [1.0, 0.0, 0.0], limit=2, kind_filter="code")
+print(f.exists(), bool(r.exists(old)), [(h["id"], round(h["distance"], 2), h["rev"]) for h in res], code_db.get_meta(idx, "index_generation"))
+for k in r.scan_iter(idx.base + "*"): r.delete(k)
 """
-    legacy = tmp / "legacy"
-    r = subprocess.run([PY, "-c", probe, str(PLUGIN / "scripts"), str(legacy)], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([PY, "-c", probe, str(PLUGIN / "scripts"), str(tmp / "legacy"), TEST_REDIS], capture_output=True, text=True, timeout=60)
     out = r.stdout.strip()
-    check("DB legacy migrato a coseno senza re-embedding (2 righe)", out.startswith("cosine 2"), out or r.stderr[-300:])
-    check("distance = 1 - cos (0.0 per identico, 0.4 per cos 0.6)", "[(1, 0.0), (2, 0.4)]" in out, out)
+    check("vecchio indice importato e file tolto", out.startswith("False False"), out or r.stderr[-300:])
+    check("vettori e revisioni ripresi (distance 1 - cos)", "[(1, 0.0, 'ha'), (2, 0.4, 'hb')] 4" in out, out or r.stderr[-300:])
 
+    pulizia = (f"import os, sys; os.environ['RAIDHO_VECTOR_REDIS'] = {TEST_REDIS!r}; sys.path.insert(0, {str(PLUGIN / 'scripts')!r}); "
+               f"import code_db; r = code_db._redis(); [r.delete(k) for k in r.scan_iter(code_db.base_key({str(project / '.raidhowiki')!r}) + '*')]")
+    subprocess.run([PY, "-c", pulizia], capture_output=True, timeout=30)
     shutil.rmtree(tmp, ignore_errors=True)
     print("=" * 44)
     if FAIL:
@@ -168,10 +181,10 @@ print(code_db.get_meta(db, "embed_metric"), code_db.get_meta(db, "embed_metric_m
 
 
 def test_embed_mock():
-    if not sqlite_vec_usable():
+    if not redis_usable():
         try:
             import pytest
-            pytest.skip("sqlite-vec non utilizzabile con questo interprete")
+            pytest.skip("Redis con Vector Sets non raggiungibile")
         except ImportError:
             return
     main()

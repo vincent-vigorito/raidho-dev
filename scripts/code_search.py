@@ -3,7 +3,7 @@
 
 Level 0: ripgrep + smart ranking (count + filename boost + recency)
 Level 1: ripgrep top-50 + LLM haiku rerank semantico
-Level 2: vector search via sqlite-vec + embed provider
+Level 2: vector search su Redis (Vector Sets) + embed provider
 
 Auto-detect default level basato su:
   - has_vector_index → level 2
@@ -42,7 +42,12 @@ def _project_root(start: Path = None) -> Optional[Path]:
 
 
 def _has_vector_index(project_root: Path) -> bool:
-    return (project_root / ".raidhowiki" / "code-index.db").exists()
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import code_db
+        return code_db.exists(project_root / ".raidhowiki")
+    except Exception:
+        return False
 
 
 _LOC_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
@@ -298,7 +303,7 @@ def search_level_1(query: str, root: Path, limit: int = 10, lang: Optional[str] 
 # ============================================================
 
 def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Optional[str] = None) -> dict:
-    """Vector search via sqlite-vec. Embed query con stesso provider usato per index."""
+    """Vector search su Redis. Embed query con stesso provider usato per index."""
     # Lazy imports
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -308,8 +313,7 @@ def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Option
         return {"level": 1, "results": [], "_fallback_reason": f"missing module: {e}"}
 
     raidhowiki = project_root / ".raidhowiki"
-    db_path = raidhowiki / "code-index.db"
-    if not db_path.exists():
+    if not code_db.exists(raidhowiki):
         # Fallback lessicale senza chiamate remote.
         l1 = search_level_0(query, project_root, limit=limit, lang=lang)
         l1["_fallback_reason"] = "vector index not built. Run `code.reindex` or `/raidho-index-code`."
@@ -345,11 +349,9 @@ def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Option
         code_db.validate_vectors(query_vecs, 1, provider.dim)
         db = code_db.open_db(raidhowiki, dim=provider.dim, create_if_missing=False, provider=provider)
         hits = code_db.vector_search(db, query_vecs[0], limit=limit, lang_filter=lang, kind_filter="code")
-        # Read manifests in the same transaction as the returned vectors.
+        # la revisione del file e' nel chunk stesso: coerente col vettore restituito
         for hit in hits:
-            row = db.execute("SELECT snapshot FROM indexed_files WHERE kind='code' AND file_path=?",
-                             (hit['file_path'],)).fetchone()
-            hit['_indexed_revision'] = json.loads(row[0]).get('hash') if row else None
+            hit['_indexed_revision'] = hit.get('rev')
     except Exception as e:
         result = search_level_0(query, project_root, limit=limit, lang=lang)
         result["_fallback_reason"] = f"vector search failed: {e}"

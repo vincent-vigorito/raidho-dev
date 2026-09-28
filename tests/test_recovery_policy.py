@@ -100,15 +100,15 @@ def test_diagnostics_does_not_construct_provider(tmp_path, monkeypatch):
 
 
 def test_failed_embedding_migration_has_restorable_snapshot(tmp_path):
-    from test_embed_mock import sqlite_vec_usable
+    from test_embed_mock import redis_usable
     from test_index_pipeline import run
-    if not sqlite_vec_usable():
-        pytest.skip('sqlite-vec unavailable')
+    if not redis_usable():
+        pytest.skip('Redis with vector sets unavailable')
     run(tmp_path, r'''
 import project_recovery
 p.model = 'changed-model'
 p.dim = 5
-with patch.object(code_db, 'upsert_chunk', side_effect=RuntimeError('interrupted migration')):
+with patch.object(code_db, 'attributi', side_effect=RuntimeError('interrupted migration')):
     result = refresh()
 assert result['status'] == 'failed'
 backup = Path(result['backup'])
@@ -122,10 +122,10 @@ assert contents() == before
 
 
 def test_retention_keeps_pending_jobs_and_active_staging(tmp_path):
-    from test_embed_mock import sqlite_vec_usable
+    from test_embed_mock import redis_usable
     from test_index_pipeline import run
-    if not sqlite_vec_usable():
-        pytest.skip('sqlite-vec unavailable')
+    if not redis_usable():
+        pytest.skip('Redis with vector sets unavailable')
     run(tmp_path, r'''
 import project_maintenance, wiki_jobs
 job = wiki_jobs.enqueue(root, page, start=False)
@@ -137,17 +137,14 @@ stage = root / '.raidhowiki/.index-stage-abandoned'
 stage.mkdir()
 os.utime(stage, (1,1))
 db = code_db.open_db(root / '.raidhowiki', dim=3)
-db.execute("INSERT INTO index_runs(id,kind,status,started,pid,details) VALUES ('active','code','building','old',?,'{}')", (os.getpid(),))
-db.commit()
+code_db.set_run(db, 'code', {'id': 'active', 'kind': 'code', 'status': 'building', 'started': 'old', 'pid': os.getpid(), 'details': {}})
 preview = project_maintenance.cleanup(root)
 assert preview['jobs'] and not preview['staging'] and preview['staging_skipped_active_build']
 assert wiki_jobs.status(root)['counts'] == {'done':1,'pending':1}
 project_maintenance.cleanup(root, apply=True)
 assert wiki_jobs.status(root)['counts'] == {'pending':1}
 assert stage.exists()
-db.execute("UPDATE index_runs SET status='failed' WHERE id='active'")
-db.commit()
-db.close()
+code_db.set_run(db, 'code', {'id': 'active', 'kind': 'code', 'status': 'failed', 'started': 'old', 'pid': os.getpid(), 'details': {}})
 project_maintenance.cleanup(root, apply=True)
 assert not stage.exists()
 ''')

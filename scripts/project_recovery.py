@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sqlite3
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -47,16 +46,11 @@ def snapshot_project(root, reason='manual'):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             metadata['files'][rel] = digest(data)
-        database = root / '.raidhowiki/code-index.db'
-        if database.is_file():
-            db = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
-            try:
-                db.execute('BEGIN')
-                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                metadata['index_manifest'] = {name: db.execute('SELECT * FROM ' + name).fetchall()
-                                              for name in ('meta', 'indexed_files') if name in tables}
-            finally:
-                db.close()
+        import code_db
+        if code_db.exists(root / '.raidhowiki'):
+            idx = code_db.open_db(root / '.raidhowiki', create_if_missing=False, allow_dimension_mismatch=True)
+            metadata['index_manifest'] = {'meta': sorted(idx.meta().items()),
+                                          'indexed_files': sorted([k, p, json.dumps(info)] for (k, p), info in code_db.manifest(idx).items())}
         if _files(root) != paths or any(digest(p.read_bytes()) != metadata['files'][str(p.relative_to(root))] for p in paths):
             raise RuntimeError('wiki changed during backup; retry')
         manifest = json.dumps(metadata, ensure_ascii=False, indent=2).encode()

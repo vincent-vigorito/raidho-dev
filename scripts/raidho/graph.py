@@ -131,7 +131,7 @@ def tool_graph_search_text(args: dict) -> dict:
         return {"error": "no embed provider configured (set RAIDHO_EMBED_PROVIDER + API key)"}
 
     raidhowiki = ROOT / ".raidhowiki"
-    if not (raidhowiki / "code-index.db").exists():
+    if not code_db.exists(raidhowiki):
         return {"error": "index not built — run code.reindex and/or wiki.embed first"}
 
     # Embedda la query (1 call al provider)
@@ -294,7 +294,7 @@ def tool_graph_semantic_neighbors(args: dict) -> dict:
         return {"error": "no embed provider available (set RAIDHO_EMBED_PROVIDER + API key)"}
 
     raidhowiki = ROOT / ".raidhowiki"
-    if not (raidhowiki / "code-index.db").exists():
+    if not code_db.exists(raidhowiki):
         return {"error": "index not built yet — run code.reindex and/or wiki.embed first"}
 
     try:
@@ -307,21 +307,15 @@ def tool_graph_semantic_neighbors(args: dict) -> dict:
         candidates = []
         if kind in ("auto", "wiki"):
             # Wiki slug: try exact match first, then suffix match (entities:foo vs foo)
-            row = db.execute(
-                "SELECT id, file_path, func_name, kind FROM chunks "
-                "WHERE kind = 'wiki' AND (func_name = ? OR func_name LIKE ?) LIMIT 1",
-                (source, f"%:{source}"),
-            ).fetchone()
+            pagine = code_db.list_wiki_pages(db)
+            row = next((p for p in pagine if p["slug"] == source), None) or \
+                next((p for p in pagine if (p["slug"] or "").endswith(":" + source)), None)
             if row:
-                candidates.append(dict(row))
+                candidates.append({"id": row["id"], "file_path": row["file_path"], "func_name": row["slug"], "kind": "wiki"})
         if kind in ("auto", "code") and not candidates:
-            row = db.execute(
-                "SELECT id, file_path, func_name, kind FROM chunks "
-                "WHERE kind = 'code' AND file_path = ? LIMIT 1",
-                (source,),
-            ).fetchone()
-            if row:
-                candidates.append(dict(row))
+            row = code_db.get_embedding_by_source(db, source, kind="code")
+            if row and row["file_path"] == source:
+                candidates.append({k: row[k] for k in ("id", "file_path", "func_name", "kind")})
 
         if not candidates:
             return {"error": f"source '{source}' not found in index (kind={kind})"}

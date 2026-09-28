@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""code_db.py — wrapper sqlite-vec per `.raidhowiki/code-index.db`.
+"""code_db.py — indice semantico di codice e wiki su Redis (Redis 8, Vector Sets).
 
-Schema:
-  chunks       — metadata + content dei chunk (id, file_path, func_name, line_start, line_end, content, lang, last_modified, sha)
-  chunk_vec    — virtual table vec0 con embedding per chunk (rowid = chunks.id)
-  meta         — last_indexed_sha, provider_name, dim, model
-  vec_dirty    — chunk cambiati da riportare su Redis (vedi sotto)
+Tutto sta in Redis, sotto un prefisso per progetto (`raidhodev:idx:<hash di .raidhowiki>`):
+  :vec          Vector Set, un elemento per chunk (id numerico) con attributi
+                {"kind", "lang"} per FILTER; quantizzazione Q8, metrica coseno
+  :chunks       hash id → JSON del chunk (file_path, func_name, righe, content, lang,
+                kind, last_modified, content_sha, rev = hash del file indicizzato)
+  :filechunks   hash "<kind>:<path>" → JSON {"ids": [...], "lang": ...}
+  :files        hash "<kind>:<path>" → JSON dello snapshot (manifest dell'incrementale)
+  :meta         hash fingerprint, generazione, stato per scope, ultimi successi
+  :run:<kind>   JSON dell'ultima run (stato, pid, errore, dettagli)
+  :nextid       contatore degli id dei chunk
 
-Lazy import sqlite-vec (deps esterna ~5MB). Errore graceful se manca.
+La pubblicazione e' atomica per chi cerca: l'incrementale e' un MULTI/EXEC sotto WATCH
+di :meta, la ricostruzione completa scrive su :new:* e scambia le chiavi con RENAME.
+RAIDHO_VECTOR_REDIS sceglie l'istanza. Se Redis manca la ricerca vettoriale non c'e'
+e i tool ripiegano sulla ricerca lessicale.
 
-Ricerca su Redis Vector Sets (Redis 8, modulo vectorset): SQLite resta la fonte
-di chunk e vettori; Redis ne tiene una copia indicizzata (HNSW) su cui la ricerca
-costa millisecondi invece di scorrere tutti i vettori. Se Redis manca, non
-risponde o non e' allineato, si cerca su sqlite-vec come prima e lo si riallinea
-in background. RAIDHO_VECTOR_REDIS sceglie l'istanza ("off" per non usarlo).
+Il vecchio `.raidhowiki/code-index.db` (SQLite + sqlite-vec) si importa una volta, senza
+nuovi embedding, se la sua copia su Redis era allineata; poi il file si toglie.
 """
 
 import hashlib
@@ -21,166 +26,127 @@ import json
 import math
 import os
 import sqlite3
-import threading
+import struct
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
-CODE_DB_FILENAME = "code-index.db"
-
-
-def _ensure_sqlite_vec(db: sqlite3.Connection) -> None:
-    """Carica sqlite-vec extension. Lazy import + load."""
-    try:
-        import sqlite_vec  # noqa
-    except ImportError:
-        raise RuntimeError(
-            "sqlite-vec required for code search. Install: pip install sqlite-vec"
-        ) from None
-    db.enable_load_extension(True)
-    import sqlite_vec
-    sqlite_vec.load(db)
-    db.enable_load_extension(False)
-
-
-def open_db(raidhowiki_root: Path, dim: int = 1536, create_if_missing: bool = True, provider=None, allow_dimension_mismatch: bool = False) -> sqlite3.Connection:
-    """Apre/crea la code-index.db sotto `.raidhowiki/`.
-
-    Args:
-      raidhowiki_root: path a `.raidhowiki/` (NON `.raidhowiki/wiki/`)
-      dim: dimensione embedding (varia per provider/model)
-      create_if_missing: True → crea schema se db non esiste
-    """
-    db_path = raidhowiki_root / CODE_DB_FILENAME
-    if raidhowiki_root.is_symlink() or db_path.is_symlink():
-        raise ValueError("index state must not be a symlink")
-    if not create_if_missing and not db_path.exists():
-        raise FileNotFoundError(f"code-index.db not found at {db_path}")
-
-    raidhowiki_root.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(str(db_path))
-    db.row_factory = sqlite3.Row
-    try:
-        _ensure_sqlite_vec(db)
-        has_meta = db.execute("SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone()
-        stored = get_meta(db, "embed_dim") if has_meta else None
-        if stored and allow_dimension_mismatch:
-            dim = int(stored)
-        if create_if_missing:
-            _init_schema(db, dim=dim, preserve_vectors=allow_dimension_mismatch)
-        elif stored and int(stored) != dim:
-            raise RuntimeError("embedding dimension mismatch; run a full reindex")
-        if provider is not None:
-            db.execute("BEGIN")
-            require_fingerprint(db, provider)
-        return db
-    except Exception:
-        db.close()
-        raise
-
-
-def _init_schema(db: sqlite3.Connection, dim: int, preserve_vectors: bool = False) -> None:
-    """Crea tabelle se mancano. Idempotente."""
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL,
-            func_name TEXT,
-            line_start INTEGER,
-            line_end INTEGER,
-            content TEXT NOT NULL,
-            lang TEXT,
-            last_modified TEXT,
-            content_sha TEXT,
-            UNIQUE(file_path, line_start, line_end)
-        );
-        CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(file_path);
-        CREATE INDEX IF NOT EXISTS idx_chunks_lang ON chunks(lang);
-
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS indexed_files (
-            kind TEXT NOT NULL, file_path TEXT NOT NULL, snapshot TEXT NOT NULL,
-            PRIMARY KEY(kind, file_path)
-        );
-        CREATE TABLE IF NOT EXISTS index_runs (
-            id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
-            started TEXT NOT NULL, finished TEXT, pid INTEGER, error TEXT, details TEXT
-        );
-        CREATE TABLE IF NOT EXISTS vec_dirty (chunk_id INTEGER PRIMARY KEY);
-    """)
-    # vec virtual table (dim fissa una volta creata; se cambi provider serve drop+recreate)
-    existing_dim = get_meta(db, "embed_dim")
-    if existing_dim and int(existing_dim) != dim:
-        raise RuntimeError(
-            f"DB dim mismatch: existing={existing_dim} requested={dim}. "
-            f"Run reindex --force (drops + rebuilds) per cambiare provider/model."
-        )
-    if not preserve_vectors or not db.execute("SELECT 1 FROM sqlite_master WHERE name='chunk_vec'").fetchone():
-        _ensure_vec_table(db, dim)
-    set_meta(db, "embed_dim", str(dim))
-    _migrate_kind_column(db)
-    db.commit()
-
-
-VEC_METRIC = "cosine"
-
-
-def _ensure_vec_table(db: sqlite3.Connection, dim: int) -> None:
-    """chunk_vec con metrica coseno: `distance` = 1 - cos, quindi lo `score = 1 - distance`
-    dei tool è una similarità coseno vera (prima era 1 - L2: ranking giusto, valori
-    fuorvianti rispetto alle soglie 0.5/0.85 documentate come "cosine").
-
-    DB creati con la metrica L2 (nessuna meta `embed_metric`) vengono migrati in place:
-    i vettori sono gli stessi, si ricrea solo la tabella virtuale. Nessun re-embedding."""
-    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_vec'").fetchone()
-    metric = get_meta(db, "embed_metric")
-    if exists and metric != VEC_METRIC:
-        rows = db.execute("SELECT rowid, embedding FROM chunk_vec").fetchall()
-        db.execute("DROP TABLE chunk_vec")
-        db.execute(f"CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding float[{dim}] distance_metric={VEC_METRIC})")
-        db.executemany("INSERT INTO chunk_vec(rowid, embedding) VALUES (?, ?)", [(r[0], r[1]) for r in rows])
-        set_meta(db, "embed_metric", VEC_METRIC)
-        set_meta(db, "embed_metric_migrated_rows", str(len(rows)))
-        return
-    if not exists:
-        db.execute(f"CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding float[{dim}] distance_metric={VEC_METRIC})")
-        set_meta(db, "embed_metric", VEC_METRIC)
-
-
-def _migrate_kind_column(db: sqlite3.Connection) -> None:
-    """Migration idempotente: aggiunge `kind` discriminator a `chunks`.
-
-    'code' (default, backwards-compat) | 'wiki' (entity/concept/source/analysis/session).
-    Code-index esistenti vengono marchiati 'code' automaticamente via DEFAULT.
-    """
-    cols = {row["name"] for row in db.execute("PRAGMA table_info(chunks)").fetchall()}
-    if "kind" in cols:
-        return
-    db.executescript("""
-        ALTER TABLE chunks ADD COLUMN kind TEXT NOT NULL DEFAULT 'code';
-        CREATE INDEX IF NOT EXISTS idx_chunks_kind ON chunks(kind);
-        CREATE INDEX IF NOT EXISTS idx_chunks_kind_path ON chunks(kind, file_path);
-    """)
-
-
-def get_meta(db: sqlite3.Connection, key: str) -> Optional[str]:
-    row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
-
-
-def set_meta(db: sqlite3.Connection, key: str, value: str, commit: bool = True) -> None:
-    db.execute(
-        "INSERT INTO meta (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value),
-    )
-    if commit:
-        db.commit()
-
-
+CODE_DB_FILENAME = "code-index.db"   # solo il vecchio formato, per l'import
+REDIS_DEFAULT = "redis://127.0.0.1:6379/14"
 PIPELINE_VERSION = "3"
+VEC_METRIC = "cosine"
+KINDS = ("code", "wiki")
+
+
+class IndexUnavailable(RuntimeError):
+    pass
+
+
+class ConcurrentPublish(RuntimeError):
+    pass
+
+
+def _redis():
+    url = os.environ.get("RAIDHO_VECTOR_REDIS", REDIS_DEFAULT)
+    if url.lower() in ("", "off", "none"):
+        return None
+    try:
+        import redis
+        r = redis.Redis.from_url(url, socket_timeout=60, socket_connect_timeout=2)
+        r.ping()
+        return r
+    except Exception:
+        return None
+
+
+def redis_ok() -> bool:
+    r = _redis()
+    if r is None:
+        return False
+    try:
+        return any((m.get(b"name") or m.get("name")) in (b"vectorset", "vectorset") for m in r.module_list())
+    except Exception:
+        return False
+
+
+def base_key(raidhowiki_root) -> str:
+    return "raidhodev:idx:" + hashlib.sha1(str(Path(raidhowiki_root).resolve()).encode()).hexdigest()[:16]
+
+
+def fkey(kind: str, path: str) -> str:
+    return f"{kind}:{path}"
+
+
+def split_fkey(field) -> tuple[str, str]:
+    field = field.decode() if isinstance(field, bytes) else field
+    kind, path = field.split(":", 1)
+    return kind, path
+
+
+def _s(v):
+    return v.decode() if isinstance(v, bytes) else v
+
+
+class Index:
+    """Maniglia dell'indice di un progetto (al posto della vecchia connessione SQLite)."""
+
+    def __init__(self, r, directory):
+        self.r = r
+        self.directory = Path(directory)
+        self.base = base_key(directory)
+
+    def k(self, name: str, prefix: Optional[str] = None) -> str:
+        return f"{prefix or self.base}:{name}"
+
+    def close(self):
+        pass
+
+    def meta(self) -> dict:
+        return {_s(a): _s(b) for a, b in self.r.hgetall(self.k("meta")).items()}
+
+    def built(self) -> bool:
+        return bool(self.r.hexists(self.k("meta"), "index_fingerprint"))
+
+
+def open_db(raidhowiki_root: Path, dim: int = 1536, create_if_missing: bool = True, provider=None,
+            allow_dimension_mismatch: bool = False) -> Index:
+    """L'indice del progetto. create_if_missing=False: FileNotFoundError se non e' mai stato costruito."""
+    raidhowiki_root = Path(raidhowiki_root)
+    if raidhowiki_root.is_symlink():
+        raise ValueError("index state must not be a symlink")
+    r = _redis()
+    if r is None:
+        raise IndexUnavailable("Redis not reachable (RAIDHO_VECTOR_REDIS): semantic index unavailable")
+    idx = Index(r, raidhowiki_root)
+    importa_legacy(idx)
+    stored = get_meta(idx, "embed_dim")
+    if not idx.built() and not create_if_missing:
+        raise FileNotFoundError(f"semantic index not built for {raidhowiki_root}")
+    if stored and int(stored) != dim and not allow_dimension_mismatch and not create_if_missing:
+        raise RuntimeError("embedding dimension mismatch; run a full reindex")
+    if provider is not None:
+        require_fingerprint(idx, provider)
+    return idx
+
+
+def exists(raidhowiki_root) -> bool:
+    """C'e' un indice pubblicato per il progetto (importando il vecchio file se serve)."""
+    r = _redis()
+    if r is None:
+        return False
+    idx = Index(r, raidhowiki_root)
+    try:
+        importa_legacy(idx)
+    except Exception:
+        pass
+    return idx.built()
+
+
+def get_meta(idx: Index, key: str) -> Optional[str]:
+    return _s(idx.r.hget(idx.k("meta"), key))
+
+
+def set_meta(idx: Index, key: str, value: str, commit: bool = True) -> None:
+    idx.r.hset(idx.k("meta"), key, value)
 
 
 def fingerprint(provider) -> str:
@@ -188,8 +154,8 @@ def fingerprint(provider) -> str:
                        "metric": VEC_METRIC, "pipeline": PIPELINE_VERSION}, sort_keys=True)
 
 
-def require_fingerprint(db, provider):
-    if get_meta(db, "index_fingerprint") != fingerprint(provider):
+def require_fingerprint(idx, provider):
+    if get_meta(idx, "index_fingerprint") != fingerprint(provider):
         raise RuntimeError("embedding fingerprint missing or incompatible; run code.reindex or wiki.embed")
 
 
@@ -204,394 +170,252 @@ def validate_vectors(vectors, count, dim):
             raise ValueError("zero vector is invalid for cosine distance")
 
 
-def reset_vectors(db, dim):
-    db.execute("DROP TABLE chunk_vec")
-    db.execute(f"CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding float[{dim}] distance_metric={VEC_METRIC})")
-    db.execute("DELETE FROM chunks")
-    db.execute("DELETE FROM indexed_files")
-    db.execute("DELETE FROM vec_dirty")
-    set_meta(db, "embed_dim", str(dim), commit=False)
-    set_meta(db, "embed_metric", VEC_METRIC, commit=False)
-    set_meta(db, "redis_rebuild", "1", commit=False)
+def fp32(vec) -> bytes:
+    return struct.pack(f"{len(vec)}f", *vec)
 
 
-def _serialize_vec(vec: list[float]) -> bytes:
-    """sqlite-vec espone serialize_float32 helper."""
-    import sqlite_vec
-    return sqlite_vec.serialize_float32(vec)
+def attributi(chunk: dict) -> str:
+    return json.dumps({"kind": chunk.get("kind") or "code", "lang": chunk.get("lang") or ""})
 
 
-def upsert_chunk(
-    db: sqlite3.Connection,
-    file_path: str,
-    func_name: Optional[str],
-    line_start: int,
-    line_end: int,
-    content: str,
-    lang: str,
-    last_modified: str,
-    content_sha: str,
-    embedding: list[float],
-    kind: str = "code",
-) -> int:
-    """Insert o update chunk + vec. Restituisce chunk_id.
+# --- lettura ------------------------------------------------------------------
 
-    `kind`: 'code' (default, backwards-compat) | 'wiki'. Vedi anche `upsert_wiki_page`.
-    """
-    # Cerca esistente
-    row = db.execute(
-        "SELECT id, content_sha FROM chunks WHERE file_path = ? AND line_start = ? AND line_end = ?",
-        (file_path, line_start, line_end),
-    ).fetchone()
-
-    if row is not None:
-        chunk_id, existing_sha = row[0], row[1]
-        if existing_sha == content_sha:
-            return chunk_id  # No change
-        # Update content + re-embed
-        db.execute(
-            "UPDATE chunks SET func_name=?, content=?, lang=?, last_modified=?, content_sha=?, kind=? WHERE id=?",
-            (func_name, content, lang, last_modified, content_sha, kind, chunk_id),
-        )
-        db.execute("DELETE FROM chunk_vec WHERE rowid = ?", (chunk_id,))
-    else:
-        cur = db.execute(
-            "INSERT INTO chunks (file_path, func_name, line_start, line_end, content, lang, last_modified, content_sha, kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (file_path, func_name, line_start, line_end, content, lang, last_modified, content_sha, kind),
-        )
-        chunk_id = cur.lastrowid
-
-    db.execute(
-        "INSERT INTO chunk_vec (rowid, embedding) VALUES (?, ?)",
-        (chunk_id, _serialize_vec(embedding)),
-    )
-    db.execute("INSERT OR IGNORE INTO vec_dirty VALUES (?)", (chunk_id,))
-    return chunk_id
+def _filtro(lang_filter, kind_filter) -> Optional[str]:
+    parti = []
+    for campo, valore in (("kind", kind_filter), ("lang", lang_filter)):
+        if valore:
+            if '"' in valore or "\\" in valore:
+                raise ValueError(f"invalid {campo} filter")
+            parti.append(f'.{campo} == "{valore}"')
+    return " and ".join(parti) or None
 
 
-def upsert_wiki_page(
-    db: sqlite3.Connection,
-    slug: str,
-    file_path: str,
-    content: str,
-    content_sha: str,
-    last_modified: str,
-    embedding: list[float],
-    page_type: Optional[str] = None,
-) -> int:
-    """Wrapper di upsert_chunk per pagine wiki (one-shot, no line range).
-
-    `func_name` archivia lo slug, `lang` archivia il page_type (entity/concept/...).
-    `line_start=line_end=0` (necessario per UNIQUE constraint).
-    """
-    return upsert_chunk(
-        db=db,
-        file_path=file_path,
-        func_name=slug,
-        line_start=0,
-        line_end=0,
-        content=content,
-        lang=page_type or "markdown",
-        last_modified=last_modified,
-        content_sha=content_sha,
-        embedding=embedding,
-        kind="wiki",
-    )
+def vector_search(idx: Index, query_vec: list[float], limit: int = 10, lang_filter: Optional[str] = None,
+                  kind_filter: Optional[str] = None, exclude_id: Optional[int] = None) -> list[dict]:
+    """Top-k per coseno. `distance` = 1 - coseno (VSIM da' (1 + coseno) / 2)."""
+    args = ["VSIM", idx.k("vec"), "FP32", fp32(query_vec), "WITHSCORES", "COUNT", limit + (1 if exclude_id is not None else 0)]
+    filtro = _filtro(lang_filter, kind_filter)
+    if filtro:
+        args += ["FILTER", filtro]
+    try:
+        raw = idx.r.execute_command(*args)
+    except Exception as exc:
+        if "key does not exist" in str(exc).lower() or not idx.r.exists(idx.k("vec")):
+            return []
+        raise
+    coppie = raw.items() if isinstance(raw, dict) else zip(raw[::2], raw[1::2])
+    distanze = {int(el): 2.0 - 2.0 * float(score) for el, score in coppie}
+    distanze.pop(exclude_id, None)
+    righe = get_chunks(idx, list(distanze))
+    out = [{**c, "distance": distanze[c["id"]]} for c in righe]
+    return sorted(out, key=lambda x: x["distance"])[:limit]
 
 
-def delete_chunks_for_file(
-    db: sqlite3.Connection,
-    file_path: str,
-    kind: Optional[str] = None,
-) -> int:
-    """Rimuovi tutti i chunks per un file. Se `kind` passato, filtra.
-    Restituisce conta righe rimosse."""
-    if kind:
-        rows = db.execute(
-            "SELECT id FROM chunks WHERE file_path = ? AND kind = ?",
-            (file_path, kind),
-        ).fetchall()
-    else:
-        rows = db.execute("SELECT id FROM chunks WHERE file_path = ?", (file_path,)).fetchall()
-    ids = [r[0] for r in rows]
+def get_chunks(idx: Index, ids: list[int]) -> list[dict]:
+    """I chunk ancora pubblicati fra `ids` (quelli tolti nel frattempo mancano)."""
     if not ids:
-        return 0
-    db.execute(f"DELETE FROM chunk_vec WHERE rowid IN ({','.join('?' * len(ids))})", ids)
-    db.execute(f"DELETE FROM chunks WHERE id IN ({','.join('?' * len(ids))})", ids)
-    db.executemany("INSERT OR IGNORE INTO vec_dirty VALUES (?)", [(i,) for i in ids])
-    return len(ids)
-
-
-def list_wiki_pages(db: sqlite3.Connection) -> list[dict]:
-    """Elenca tutte le pagine wiki indexate (slug + path + hash) per consistency check."""
-    rows = db.execute(
-        "SELECT id, func_name AS slug, file_path, content_sha, lang AS page_type, last_modified "
-        "FROM chunks WHERE kind = 'wiki' ORDER BY func_name"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def vector_search(
-    db: sqlite3.Connection,
-    query_vec: list[float],
-    limit: int = 10,
-    lang_filter: Optional[str] = None,
-    kind_filter: Optional[str] = None,
-    exclude_id: Optional[int] = None,
-) -> list[dict]:
-    """Top-k vector search per cosine distance. Joina con chunks per metadata.
-
-    sqlite-vec knn richiede `k = ?` predicate (più efficiente di LIMIT plain).
-    Filtri lang/kind/exclude_id applicati in Python su over-fetch (3×).
-    """
-    needs_post_filter = bool(lang_filter or kind_filter or exclude_id is not None)
-    k = limit * 3 if needs_post_filter else limit
-    rows = _cerca_redis(db, query_vec, k)
-    if rows is not None:
-        return _filtra(rows, limit, lang_filter, kind_filter, exclude_id) if needs_post_filter else rows[:limit]
-    sql = """
-        SELECT c.id, c.file_path, c.func_name, c.line_start, c.line_end,
-               c.content, c.lang, c.kind, c.last_modified, v.distance
-        FROM chunk_vec v
-        JOIN chunks c ON c.id = v.rowid
-        WHERE v.embedding MATCH ? AND k = ?
-        ORDER BY v.distance
-    """
-    params: list = [_serialize_vec(query_vec), k]
-    rows = db.execute(sql, params).fetchall()
-    if needs_post_filter:
-        out = []
-        for r in rows:
-            if lang_filter and r["lang"] != lang_filter:
-                continue
-            if kind_filter and r["kind"] != kind_filter:
-                continue
-            if exclude_id is not None and r["id"] == exclude_id:
-                continue
-            out.append(r)
-            if len(out) >= limit:
-                break
-        rows = out
-    else:
-        rows = rows[:limit]
-    return [dict(row) for row in rows]
-
-
-def _filtra(rows, limit, lang_filter, kind_filter, exclude_id):
+        return []
     out = []
-    for r in rows:
-        if (lang_filter and r["lang"] != lang_filter) or (kind_filter and r["kind"] != kind_filter) \
-                or (exclude_id is not None and r["id"] == exclude_id):
-            continue
-        out.append(r)
-        if len(out) >= limit:
-            break
+    for cid, raw in zip(ids, idx.r.hmget(idx.k("chunks"), [str(i) for i in ids])):
+        if raw is not None:
+            out.append({"id": cid, **json.loads(raw)})
     return out
 
 
-# --- Redis Vector Sets -------------------------------------------------------
+def _scan(idx: Index, name: str, match: str = "*") -> Iterable[tuple[str, bytes]]:
+    for field, value in idx.r.hscan_iter(idx.k(name), match=match, count=1000):
+        yield _s(field), value
 
-REDIS_DEFAULT = "redis://127.0.0.1:6379/14"
-_SYNC_LOCK = threading.Lock()
+
+def file_chunk_ids(idx: Index, kind: Optional[str] = None) -> dict:
+    """(kind, path) → [id] dei file che hanno chunk pubblicati."""
+    out = {}
+    for field, value in _scan(idx, "filechunks", f"{kind}:*" if kind else "*"):
+        out[split_fkey(field)] = json.loads(value)["ids"]
+    return out
 
 
-def _redis():
-    url = os.environ.get("RAIDHO_VECTOR_REDIS", REDIS_DEFAULT)
-    if url.lower() in ("", "off", "none"):
-        return None
+def list_chunks(idx: Index, kind: Optional[str] = None, limit: Optional[int] = None) -> list[dict]:
+    ids = [i for lst in file_chunk_ids(idx, kind).values() for i in lst]
+    ids.sort()
+    return get_chunks(idx, ids[:limit] if limit else ids)
+
+
+def list_wiki_pages(idx: Index) -> list[dict]:
+    """Le pagine wiki indicizzate (slug + path + hash) per i controlli di coerenza."""
+    pagine = [{"id": c["id"], "slug": c.get("func_name"), "file_path": c["file_path"], "content_sha": c.get("content_sha"),
+               "page_type": c.get("lang"), "last_modified": c.get("last_modified")}
+              for c in list_chunks(idx, "wiki")]
+    return sorted(pagine, key=lambda p: p["slug"] or "")
+
+
+def get_embedding_by_source(idx: Index, source: str, kind: Optional[str] = None) -> Optional[dict]:
+    """Il primo chunk per file_path o slug (wiki)."""
+    for k in ([kind] if kind else list(KINDS)):
+        ids = file_chunk_ids(idx, k).get((k, source))
+        if ids:
+            return get_chunks(idx, [min(ids)])[0]
+    for c in list_chunks(idx, kind):
+        if c.get("func_name") == source:
+            return c
+    return None
+
+
+def get_embedding_vector(idx: Index, chunk_id: int) -> Optional[list[float]]:
+    """Il vettore di un chunk (dequantizzato da Q8) da usare come query k-NN."""
     try:
-        import redis
-        r = redis.Redis.from_url(url, socket_timeout=10, socket_connect_timeout=2)
-        r.ping()
-        return r
+        v = idx.r.execute_command("VEMB", idx.k("vec"), str(chunk_id))
     except Exception:
         return None
+    return [float(x) for x in v] if v else None
 
 
-def _db_path(db) -> str:
-    return next(row[2] for row in db.execute("PRAGMA database_list") if row[1] == "main")
+def manifest(idx: Index) -> dict:
+    return {split_fkey(f): json.loads(v) for f, v in _scan(idx, "files")}
 
 
-def _chiave(db) -> str:
-    """Un vector set per indice: il path del DB lo rende unico anche con piu' progetti per container."""
-    return "raidhodev:vec:" + hashlib.sha1(_db_path(db).encode()).hexdigest()[:16]
+def get_run(idx: Index, kind: str) -> Optional[dict]:
+    raw = idx.r.get(idx.k("run:" + kind))
+    return json.loads(raw) if raw else None
 
 
-def _versione(db) -> str:
-    return f"{get_meta(db, 'index_fingerprint') or ''}|{get_meta(db, 'index_generation') or '0'}"
+def set_run(idx: Index, kind: str, run: dict, pipe=None) -> None:
+    (pipe or idx.r).set(idx.k("run:" + kind), json.dumps(run))
 
 
-def _cerca_redis(db, query_vec, k):
-    """Righe come vector_search, o None se si deve cercare su SQLite (Redis assente o
-    non allineato: in quel caso parte il riallineamento in background)."""
-    r = _redis()
-    if r is None:
-        return None
+def stats(idx: Index) -> dict:
+    by_lang, by_kind = {}, {}
+    for field, value in _scan(idx, "filechunks"):
+        kind, _path = split_fkey(field)
+        dati = json.loads(value)
+        n = len(dati["ids"])
+        by_kind[kind] = by_kind.get(kind, 0) + n
+        by_lang[dati.get("lang") or ""] = by_lang.get(dati.get("lang") or "", 0) + n
+    meta = idx.meta()
     try:
-        key = _chiave(db)
-        sporchi = db.execute("SELECT 1 FROM sqlite_master WHERE name='vec_dirty'").fetchone() and \
-            db.execute("SELECT 1 FROM vec_dirty LIMIT 1").fetchone()
-        if sporchi or get_meta(db, "redis_rebuild") or (r.get(key + ":versione") or b"").decode() != _versione(db):
-            _sync_in_background(_db_path(db))
-            return None
-        raw = r.execute_command("VSIM", key, "FP32", _serialize_vec(query_vec), "WITHSCORES", "COUNT", k)
+        mb = sum(idx.r.memory_usage(idx.k(n)) or 0 for n in ("vec", "chunks", "files", "filechunks")) / 1024 ** 2
     except Exception:
-        return None
-    coppie = raw.items() if isinstance(raw, dict) else zip(raw[::2], raw[1::2])
-    # VSIM da' (1 + coseno) / 2: la distanza coseno usata qui sotto e' 1 - coseno
-    distanze = {int(el): 2.0 - 2.0 * float(score) for el, score in coppie}
-    if not distanze:
-        return []
-    righe = db.execute(
-        "SELECT id, file_path, func_name, line_start, line_end, content, lang, kind, last_modified FROM chunks "
-        f"WHERE id IN ({','.join('?' * len(distanze))})", list(distanze)).fetchall()
-    out = [{**dict(row), "distance": distanze[row["id"]]} for row in righe]
-    return sorted(out, key=lambda x: x["distance"])
-
-
-def _sync_in_background(path: str) -> None:
-    if _SYNC_LOCK.locked():
-        return
-
-    def giro():
-        with _SYNC_LOCK:
-            try:
-                conn = open_db(Path(path).parent, create_if_missing=False, allow_dimension_mismatch=True)
-                try:
-                    redis_sync(conn)
-                finally:
-                    conn.close()
-            except Exception:
-                pass
-    threading.Thread(target=giro, name="raidhodev-redis-sync", daemon=True).start()
-
-
-def redis_sync(db, lotto: int = 500) -> dict:
-    """Porta su Redis i chunk cambiati (vec_dirty) o, se Redis non e' allineato, lo
-    ricostruisce da SQLite su una chiave nuova scambiata alla fine (chi cerca non vede
-    mai un indice a meta'). Niente embedding: i vettori sono gia' in SQLite."""
-    r = _redis()
-    if r is None:
-        return {"redis": False}
-    db.execute("CREATE TABLE IF NOT EXISTS vec_dirty (chunk_id INTEGER PRIMARY KEY)")
-    db.commit()
-    key = _chiave(db)
-    if not r.set(key + ":lock", str(os.getpid()), nx=True, ex=900):
-        return {"redis": True, "occupato": True}
-    try:
-        versione = _versione(db)
-        ricostruire = bool(get_meta(db, "redis_rebuild")) or not r.exists(key) or \
-            r.get(key + ":versione") is None or \
-            int(r.execute_command("VCARD", key) or 0) + db.execute("SELECT COUNT(*) FROM vec_dirty").fetchone()[0] \
-            < db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        sporchi = [row[0] for row in db.execute("SELECT chunk_id FROM vec_dirty")]
-        if ricostruire:
-            nuova = key + ":nuova"
-            r.delete(nuova)
-            cur = db.execute("SELECT rowid, embedding FROM chunk_vec")
-            n = 0
-            while blocco := cur.fetchmany(lotto):
-                pipe = r.pipeline(transaction=False)
-                for rid, blob in blocco:
-                    pipe.execute_command("VADD", nuova, "FP32", blob, str(rid))
-                pipe.execute()
-                n += len(blocco)
-            if n:
-                r.rename(nuova, key)
-            else:
-                r.delete(key)
-            esito = {"redis": True, "ricostruito": n}
-        else:
-            for i in range(0, len(sporchi), lotto):
-                parte = sporchi[i:i + lotto]
-                vettori = dict(db.execute(
-                    f"SELECT rowid, embedding FROM chunk_vec WHERE rowid IN ({','.join('?' * len(parte))})", parte).fetchall())
-                pipe = r.pipeline(transaction=False)
-                for cid in parte:
-                    if cid in vettori:
-                        pipe.execute_command("VADD", key, "FP32", vettori[cid], str(cid))
-                    else:
-                        pipe.execute_command("VREM", key, str(cid))
-                pipe.execute()
-            esito = {"redis": True, "aggiornati": len(sporchi)}
-        if sporchi:
-            db.executemany("DELETE FROM vec_dirty WHERE chunk_id = ?", [(c,) for c in sporchi])
-        db.execute("DELETE FROM meta WHERE key = 'redis_rebuild'")
-        db.commit()
-        r.set(key + ":versione", versione)
-        return esito
-    finally:
-        r.delete(key + ":lock")
-
-
-def compatta_se_serve(db, soglia: float = 0.3) -> bool:
-    """VACUUM quando oltre `soglia` delle pagine sono libere (dopo molti reindex il file
-    resta gonfio e la ricerca su SQLite legge anche quelle)."""
-    pagine = db.execute("PRAGMA page_count").fetchone()[0]
-    libere = db.execute("PRAGMA freelist_count").fetchone()[0]
-    if pagine and libere / pagine > soglia:
-        db.commit()
-        db.execute("VACUUM")
-        return True
-    return False
-
-
-def get_embedding_by_source(
-    db: sqlite3.Connection,
-    source: str,
-    kind: Optional[str] = None,
-) -> Optional[dict]:
-    """Trova il primo chunk per source (file_path o slug-as-file_path) + kind.
-
-    Ritorna dict con id + metadata (no embedding raw, serve solo l'id per query knn).
-    """
-    if kind:
-        row = db.execute(
-            "SELECT id, file_path, func_name, line_start, line_end, lang, kind FROM chunks "
-            "WHERE (file_path = ? OR func_name = ?) AND kind = ? LIMIT 1",
-            (source, source, kind),
-        ).fetchone()
-    else:
-        row = db.execute(
-            "SELECT id, file_path, func_name, line_start, line_end, lang, kind FROM chunks "
-            "WHERE file_path = ? OR func_name = ? LIMIT 1",
-            (source, source),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def get_embedding_vector(db: sqlite3.Connection, chunk_id: int) -> Optional[list[float]]:
-    """Ritorna l'embedding raw per un chunk_id (per usarlo come query knn altrove)."""
-    row = db.execute(
-        "SELECT embedding FROM chunk_vec WHERE rowid = ?", (chunk_id,)
-    ).fetchone()
-    if not row:
-        return None
-    import struct
-    blob = row[0]
-    return list(struct.unpack(f"{len(blob) // 4}f", blob))
-
-
-def stats(db: sqlite3.Connection) -> dict:
-    """Statistiche dell'index."""
-    total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-    by_lang = {
-        row[0]: row[1]
-        for row in db.execute("SELECT lang, COUNT(*) FROM chunks GROUP BY lang ORDER BY 2 DESC").fetchall()
-    }
-    by_kind = {
-        row[0]: row[1]
-        for row in db.execute("SELECT kind, COUNT(*) FROM chunks GROUP BY kind ORDER BY 2 DESC").fetchall()
-    }
-    last_modified = db.execute("SELECT MAX(last_modified) FROM chunks").fetchone()[0]
+        mb = None
     return {
-        "total_chunks": total,
-        "by_lang": by_lang,
+        "total_chunks": sum(by_kind.values()),
+        "by_lang": dict(sorted(by_lang.items(), key=lambda x: -x[1])),
         "by_kind": by_kind,
-        "last_modified": last_modified,
-        "embed_dim": get_meta(db, "embed_dim"),
-        "embed_provider": get_meta(db, "embed_provider"),
-        "embed_model": get_meta(db, "embed_model"),
-        "last_indexed_sha": get_meta(db, "last_indexed_sha"),
+        "last_modified": meta.get("last_indexed_at"),
+        "embed_dim": meta.get("embed_dim"),
+        "embed_provider": meta.get("embed_provider"),
+        "embed_model": meta.get("embed_model"),
+        "last_indexed_sha": meta.get("last_indexed_sha"),
+        "redis_vectors": int(idx.r.execute_command("VCARD", idx.k("vec")) or 0) if idx.r.exists(idx.k("vec")) else 0,
+        "redis_mb": round(mb, 1) if mb is not None else None,
     }
+
+
+def prendi_lock(idx: Index, cosa: str, durata: int = 6 * 3600) -> Optional[str]:
+    """Lock del progetto per le chiavi :new:* (ricostruzione, import). Un lock rimasto a un
+    processo morto (crash durante una ricostruzione) si riprende. Torna il valore o None."""
+    valore = f"{os.getpid()}:{cosa}"
+    for _ in range(2):
+        if idx.r.set(idx.k("lock"), valore, nx=True, ex=durata):
+            return valore
+        chi = _s(idx.r.get(idx.k("lock"))) or ""
+        try:
+            os.kill(int(chi.split(":")[0]), 0)
+            return None
+        except PermissionError:
+            return None
+        except (ValueError, ProcessLookupError):
+            idx.r.delete(idx.k("lock"))
+    return None
+
+
+def lascia_lock(idx: Index, valore: str) -> None:
+    if _s(idx.r.get(idx.k("lock"))) == valore:
+        idx.r.delete(idx.k("lock"))
+
+
+# --- import del vecchio formato -----------------------------------------------
+
+def _legacy_keys(r, db_file: Path) -> list[str]:
+    return ["raidhodev:vec:" + hashlib.sha1(str(p).encode()).hexdigest()[:16] for p in dict.fromkeys((db_file, db_file.resolve()))]
+
+
+def _togli_legacy(r, db_file: Path) -> None:
+    for k in _legacy_keys(r, db_file):
+        r.delete(k, k + ":versione", k + ":lock", k + ":nuova")
+    for p in (db_file, db_file.with_name(db_file.name + "-journal"), db_file.with_name(db_file.name + "-wal"),
+              db_file.with_name(db_file.name + "-shm"), db_file.with_name(db_file.name + "?mode=ro")):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def importa_legacy(idx: Index) -> dict:
+    """Porta il vecchio code-index.db su Redis senza nuovi embedding: chunk, manifest e meta
+    dal file (SQLite semplice, niente sqlite-vec), vettori dalla sua copia su Redis se era
+    allineata. Se non lo era il file resta dov'e' e l'indice si ricostruisce al prossimo reindex."""
+    db_file = idx.directory / CODE_DB_FILENAME
+    if not db_file.is_file() or db_file.is_symlink():
+        return {"import": False}
+    r = idx.r
+    if idx.built():
+        _togli_legacy(r, db_file)
+        return {"import": False, "legacy_removed": True}
+    db = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True)
+    try:
+        tables = {t for (t,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"meta", "chunks", "indexed_files"} <= tables:
+            return {"import": False, "reason": "legacy schema"}
+        meta = dict(db.execute("SELECT key, value FROM meta"))
+        chunks = db.execute("SELECT id, file_path, func_name, line_start, line_end, content, lang, last_modified, "
+                            "content_sha, kind FROM chunks").fetchall()
+        files = db.execute("SELECT kind, file_path, snapshot FROM indexed_files").fetchall()
+    finally:
+        db.close()
+    versione = f"{meta.get('index_fingerprint') or ''}|{meta.get('index_generation') or '0'}"
+    vecchia = next((k for k in _legacy_keys(r, db_file)
+                    if r.exists(k) and _s(r.get(k + ":versione")) == versione), None)
+    if not vecchia or not meta.get("index_fingerprint") or int(r.execute_command("VCARD", vecchia) or 0) != len(chunks):
+        return {"import": False, "reason": "redis copy not aligned"}
+    lock = prendi_lock(idx, "import", 900)
+    if lock is None:
+        return {"import": False, "reason": "busy"}
+    try:
+        nuovo = idx.k("new")
+        r.delete(*(f"{nuovo}:{n}" for n in ("vec", "chunks", "files", "filechunks")))
+        rev = {(k, p): json.loads(s).get("hash") for k, p, s in files}
+        per_file = {}
+        pipe = r.pipeline(transaction=False)
+        for n, (cid, path, func, ls, le, content, lang, mod, sha, kind) in enumerate(chunks, 1):
+            pipe.hset(f"{nuovo}:chunks", str(cid), json.dumps({
+                "file_path": path, "func_name": func, "line_start": ls, "line_end": le, "content": content,
+                "lang": lang, "kind": kind, "last_modified": mod, "content_sha": sha, "rev": rev.get((kind, path))}))
+            per_file.setdefault((kind, path), {"ids": [], "lang": lang})["ids"].append(cid)
+            if n % 1000 == 0:
+                pipe.execute()
+        for (kind, path), dati in per_file.items():
+            pipe.hset(f"{nuovo}:filechunks", fkey(kind, path), json.dumps(dati))
+        for kind, path, snap in files:
+            pipe.hset(f"{nuovo}:files", fkey(kind, path), snap)
+        pipe.execute()
+        # i vettori ci sono gia': si sposta il set e si aggiungono gli attributi per FILTER
+        r.rename(vecchia, f"{nuovo}:vec")
+        pipe = r.pipeline(transaction=False)
+        for n, (cid, _path, _func, _ls, _le, _content, lang, _mod, _sha, kind) in enumerate(chunks, 1):
+            pipe.execute_command("VSETATTR", f"{nuovo}:vec", str(cid), attributi({"kind": kind, "lang": lang}))
+            if n % 2000 == 0:
+                pipe.execute()
+        pipe.execute()
+        pipe = r.pipeline(transaction=True)
+        for n in ("vec", "chunks", "files", "filechunks"):
+            if r.exists(f"{nuovo}:{n}"):
+                pipe.rename(f"{nuovo}:{n}", idx.k(n))
+        pipe.delete(idx.k("meta"))
+        pipe.hset(idx.k("meta"), mapping={**{k: v for k, v in meta.items() if v is not None},
+                                           "imported_from_sqlite": str(len(chunks))})
+        pipe.set(idx.k("nextid"), max((c[0] for c in chunks), default=0))
+        pipe.execute()
+        _togli_legacy(r, db_file)
+        return {"import": True, "chunks": len(chunks), "files": len(files)}
+    finally:
+        lascia_lock(idx, lock)

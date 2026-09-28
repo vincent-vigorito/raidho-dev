@@ -65,8 +65,8 @@ def tool_code_reindex(args: dict) -> dict:
     """Wrapper MCP per code_index.index(). Build/refresh vector index.
 
     L'indicizzazione gira come processo a parte, staccato dal server MCP: chi la chiede
-    (un agente, a meta' turno) non aspetta i minuti degli embedding. Solo dry_run e'
-    immediato. Log in ~/.raidho/work/reindex-mcp.log."""
+    (un agente, a meta' turno) non aspetta i minuti degli embedding. dry_run e wait=true
+    girano qui e tornano l'esito. Log in ~/.raidho/work/reindex-mcp.log."""
     ci = _code_index_module()
     if ci is None:
         return {"error": "code_index module not available"}
@@ -74,8 +74,8 @@ def tool_code_reindex(args: dict) -> dict:
     limit = args.get("limit")
     if limit is not None:
         limit = int(limit)
-    if args.get("dry_run"):
-        return ci.index(target=ROOT, force=force, limit=limit, verbose=False, dry_run=True)
+    if args.get("dry_run") or args.get("wait"):
+        return ci.index(target=ROOT, force=force, limit=limit, verbose=False, dry_run=bool(args.get("dry_run")))
     import subprocess
     import sys as _sys
     lavoro = Path.home() / ".raidho" / "work"
@@ -149,7 +149,7 @@ TOOLS = [
             "variabile/classe (es. 'trova authenticate()', 'usi di FOO_CONST'). "
             "3 livelli: 0=ripgrep+smart ranking (filename/func boost + git "
             "recency), 1=ripgrep top-50 + LLM haiku rerank semantico, 2=vector "
-            "via sqlite-vec + embed provider (richiede `code.reindex`). "
+            "su Redis (Vector Sets) + embed provider (richiede `code.reindex`). "
             "Auto-detect: index disponibile→2, <5k LOC→0, altrimenti→1. "
             "Graceful fallback se livello superiore non disponibile. Riferimenti verificati con SHA256 e righe; "
             "evidence.abstain segnala assenza di riscontro letterale, non una soglia semantica calibrata. "
@@ -173,8 +173,8 @@ TOOLS = [
         "name": "code.reindex",
         "group": "code",
         "description": (
-            "🔎 CODE: build/refresh vector index per il codebase del progetto in "
-            "`.raidhowiki/code-index.db`. Incremental di default (hash del working tree), "
+            "🔎 CODE: build/refresh dell'indice semantico del codebase (su Redis). "
+            "Incremental di default (hash del working tree), "
             "force=true per rebuild transazionale. Usa il provider configurato "
             "via RAIDHO_EMBED_PROVIDER (default openrouter)."
         ),
@@ -184,6 +184,7 @@ TOOLS = [
                 "dry_run": {"type": "boolean", "default": False, "description": "Anteprima locale senza inviare contenuti o modificare l’indice"},
                 "force": {"type": "boolean", "default": False, "description": "true=full rebuild, false=incremental"},
                 "limit": {"type": "integer", "description": "Max file da processare (debug)"},
+                "wait": {"type": "boolean", "default": False, "description": "true=aspetta la fine e torna l'esito (di default gira staccato)"},
             },
         },
     },
@@ -192,7 +193,7 @@ TOOLS = [
         "group": "code",
         "description": (
             "🔎 CODE: stato del vector index del codebase. Restituisce: chunks totali, "
-            "by-lang, provider/model usato, last_indexed_sha, size DB su disco. "
+            "by-lang, provider/model usato, last_indexed_sha, memoria su Redis. "
             "Restituisce indexed=false con hint se l'index non esiste ancora."
         ),
         "inputSchema": {"type": "object", "properties": {}},

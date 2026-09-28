@@ -19,7 +19,7 @@ def cleanup(root, days=30, apply=False):
     cutoff = time.time() - days * 86400
     report = {'dry_run':not apply, 'transcripts':session_archive.purge(root, days, apply), 'jobs':[], 'staging':[]}
     queue = directory / 'wiki-jobs.db'
-    if queue.is_symlink() or (directory / 'code-index.db').is_symlink():
+    if queue.is_symlink():
         raise ValueError('maintenance refuses symlink databases')
     if queue.exists():
         db = sqlite3.connect(queue.as_uri() + ('?mode=rw' if apply else '?mode=ro'), uri=True)
@@ -32,21 +32,18 @@ def cleanup(root, days=30, apply=False):
         finally:
             db.close()
     active = False
-    index = directory / 'code-index.db'
-    if index.exists():
-        db = sqlite3.connect(index.as_uri() + '?mode=ro', uri=True)
-        try:
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='index_runs'").fetchone():
-                for row in db.execute("SELECT pid FROM index_runs WHERE status='building'"):
-                    try:
-                        os.kill(row[0], 0)
-                        active = True
-                    except ProcessLookupError:
-                        pass
-                    except (TypeError, PermissionError):
-                        active = True
-        finally:
-            db.close()
+    import code_db
+    if code_db.redis_ok():
+        idx = code_db.Index(code_db._redis(), directory)
+        for run in (code_db.get_run(idx, kind) for kind in code_db.KINDS):
+            if run and run.get('status') == 'building':
+                try:
+                    os.kill(run['pid'], 0)
+                    active = True
+                except ProcessLookupError:
+                    pass
+                except (TypeError, PermissionError):
+                    active = True
     if not active:
         for path in directory.glob('.index-stage-*'):
             if path.is_dir() and not path.is_symlink() and path.stat().st_mtime < cutoff:

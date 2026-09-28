@@ -161,6 +161,49 @@ def _write_gemini(target: Path) -> None:
         gemini.write_text((target / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
 
 
+# Nel composed, letto a ogni sessione da ogni agente, le sezioni della SOUL che
+# crescono senza limite restano corte: le voci piu' recenti entro il limite (in
+# caratteri); le altre restano in SOUL.md, raggiungibili con memory.search.
+LIMITI_SOUL = {"## Memorable feedback": 6000, "## Relationship facts": 8000}
+# di queste sezioni si tiene solo la riga titolo di ogni voce
+SOLO_TITOLI = {"## Relationship facts"}
+
+
+def _compatta_soul(text: str) -> str:
+    out: list[str] = []
+    sezione = None
+    voci: list[str] = []
+
+    def chiudi():
+        if sezione is None:
+            return
+        tenute, peso = [], 0
+        for v in reversed(voci):
+            if peso + len(v) > LIMITI_SOUL[sezione]:
+                break
+            tenute.append(v)
+            peso += len(v) + 1
+        tenute.reverse()
+        if len(voci) > len(tenute):
+            out.append(f"- … altre {len(voci) - len(tenute)} voci piu' vecchie in SOUL.md (memory.search)")
+        out.extend(tenute)
+
+    for riga in text.splitlines():
+        if riga.startswith("#"):
+            chiudi()
+            voci = []
+            sezione = riga.strip() if riga.strip() in LIMITI_SOUL else None
+            out.append(riga)
+        elif sezione is None:
+            out.append(riga)
+        elif riga.startswith("- "):
+            voci.append(riga)
+        elif voci and riga.strip() and not riga.lstrip().startswith("<!--") and sezione not in SOLO_TITOLI:
+            voci[-1] += "\n" + riga
+    chiudi()
+    return "\n".join(out)
+
+
 def compose(target: Path, dry_run: bool = False, quiet: bool = False) -> int:
     target = target.resolve()
     if not target.is_dir():
@@ -188,7 +231,7 @@ def compose(target: Path, dry_run: bool = False, quiet: bool = False) -> int:
     if soul_text:
         parts.append("\n---\n")
         parts.append("\n# SOUL — identity, preferences, memorable feedback\n")
-        parts.append(_strip_frontmatter(soul_text).strip())
+        parts.append(_compatta_soul(_strip_frontmatter(soul_text).strip()))
         parts.append("\n")
     if tools_text:
         parts.append("\n---\n")

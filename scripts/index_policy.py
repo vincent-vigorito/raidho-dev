@@ -56,7 +56,10 @@ def provider_info():
 
 def authorize(root, provider=None):
     info = provider_info() if provider is None else {'provider': provider.name, 'model': provider.model}
-    if info['provider'] in REMOTE and config(root).get('remote') != {'provider': info['provider'], 'model': info['model']}:
+    # consenso dato in Raidho (Project settings → Semantic search): lo scrive il file gestito
+    # caricato da secrets_loader, alla pari di index-policy.json
+    raidho = os.environ.get('RAIDHO_EMBED_REMOTE_OK') == f"{info['provider']}/{info['model']}"
+    if info['provider'] in REMOTE and not raidho and config(root).get('remote') != {'provider': info['provider'], 'model': info['model']}:
         raise PolicyError('remote indexing requires matching provider/model in .raidhowiki/index-policy.json')
 
 

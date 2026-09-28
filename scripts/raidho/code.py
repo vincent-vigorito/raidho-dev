@@ -1,6 +1,8 @@
 """Gruppo `code`: ricerca nel codebase (3 livelli) + index."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from .config import ROOT, SCRIPTS_DIR, log_exc
 
 
@@ -60,7 +62,11 @@ def tool_code_inspect(args: dict) -> dict:
 
 
 def tool_code_reindex(args: dict) -> dict:
-    """Wrapper MCP per code_index.index(). Build/refresh vector index."""
+    """Wrapper MCP per code_index.index(). Build/refresh vector index.
+
+    L'indicizzazione gira come processo a parte, staccato dal server MCP: chi la chiede
+    (un agente, a meta' turno) non aspetta i minuti degli embedding. Solo dry_run e'
+    immediato. Log in ~/.raidho/work/reindex-mcp.log."""
     ci = _code_index_module()
     if ci is None:
         return {"error": "code_index module not available"}
@@ -68,7 +74,20 @@ def tool_code_reindex(args: dict) -> dict:
     limit = args.get("limit")
     if limit is not None:
         limit = int(limit)
-    return ci.index(target=ROOT, force=force, limit=limit, verbose=False, dry_run=bool(args.get("dry_run", False)))
+    if args.get("dry_run"):
+        return ci.index(target=ROOT, force=force, limit=limit, verbose=False, dry_run=True)
+    import subprocess
+    import sys as _sys
+    lavoro = Path.home() / ".raidho" / "work"
+    lavoro.mkdir(parents=True, exist_ok=True)
+    codice = ("import sys; sys.path.insert(0, %r); import secrets_loader, code_index; "
+              "secrets_loader.load_secrets(%r); print(code_index.index(target=%r, force=%r, limit=%r, verbose=True, "
+              "dry_run=False))" % (str(SCRIPTS_DIR), str(ROOT), str(ROOT), force, limit))
+    with open(lavoro / "reindex-mcp.log", "a") as out:
+        p = subprocess.Popen([_sys.executable, "-c", codice], stdout=out, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(ROOT))
+    return {"started": True, "pid": p.pid, "log": str(lavoro / "reindex-mcp.log"),
+            "note": "indexing runs as a separate process: do not wait for it, go on with your work"}
 
 
 def tool_code_status(args: dict) -> dict:

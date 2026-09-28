@@ -49,7 +49,9 @@ def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -
         raise RuntimeError("httpx required for API embedding providers. Install: pip install httpx") from None
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
+        if resp.is_error:
+            # il motivo sta nel corpo (modello, input troppo lungo, credito): senza non si capisce
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}: {resp.text[:500]}")
         return resp.json()
 
 
@@ -139,7 +141,7 @@ class VoyageProvider(EmbedProvider):
             "voyage-3": 1024,
             "voyage-3-lite": 512,
             "voyage-large-2": 1536,
-        }.get(self.model, 1024)
+        }.get(self.model) or int(os.environ.get("RAIDHO_EMBED_DIM") or 1024)
         self.url = "https://api.voyageai.com/v1/embeddings"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -170,7 +172,7 @@ class OpenAIProvider(EmbedProvider):
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
             "text-embedding-ada-002": 1536,
-        }.get(self.model, 1536)
+        }.get(self.model) or int(os.environ.get("RAIDHO_EMBED_DIM") or 1536)
         self.url = "https://api.openai.com/v1/embeddings"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -262,22 +264,28 @@ def get_provider() -> Optional[EmbedProvider]:
     if name == "none":
         return None
 
-    fallback_key = os.environ.get("RAIDHO_EMBED_API_KEY")
+    def _env(nome):
+        # `${NOME}` non espanso (placeholder di .mcp.json) vale come assente: una chiave
+        # finta dava 401 invece del ripiego pulito "no embed provider"
+        v = os.environ.get(nome)
+        return None if v and v.strip().startswith("${") and v.strip().endswith("}") else v
+
+    fallback_key = _env("RAIDHO_EMBED_API_KEY")
 
     if name == "openrouter":
-        key = os.environ.get("OPENROUTER_API_KEY") or fallback_key
+        key = _env("OPENROUTER_API_KEY") or fallback_key
         if not key:
             return None
         return OpenRouterProvider(api_key=key)
 
     if name == "voyage":
-        key = os.environ.get("VOYAGE_API_KEY") or fallback_key
+        key = _env("VOYAGE_API_KEY") or fallback_key
         if not key:
             return None
         return VoyageProvider(api_key=key)
 
     if name == "openai":
-        key = os.environ.get("OPENAI_API_KEY") or fallback_key
+        key = _env("OPENAI_API_KEY") or fallback_key
         if not key:
             return None
         return OpenAIProvider(api_key=key)

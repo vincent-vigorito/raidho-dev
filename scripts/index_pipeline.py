@@ -245,6 +245,12 @@ def _refresh(root, kind, force=False, limit=None, include_sessions=False, single
                 db.commit()
             finally:
                 stage.close()
+        # copia di ricerca su Redis e file compatto: mai un motivo per far fallire l'indice
+        try:
+            code_db.redis_sync(db)
+            code_db.compatta_se_serve(db)
+        except Exception:
+            pass
         return {"status": state, "indexed_files": len(selected), "indexed_chunks": indexed_chunks,
                 "scanned": len(current), "embedded": indexed_chunks, "deleted_orphans": len(deleted),
                 "skipped_unchanged": len(current) - len(selected) - len(deferred),

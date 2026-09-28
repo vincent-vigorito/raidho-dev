@@ -329,7 +329,12 @@ def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Option
 
     from index_pipeline import index_status
     status = index_status(project_root, provider)
-    if status["status"] != "ready":
+    # un indice indietro rispetto al codice resta utile (search_evidence scarta i risultati
+    # dei file cambiati): si ripiega su ripgrep solo senza un'indicizzazione riuscita
+    usabile = status["status"] == "ready" or (
+        status["status"] in ("stale", "partial", "building", "failed")
+        and (status.get("scopes") or {}).get("code", {}).get("last_success"))
+    if not usabile:
         result = search_level_0(query, project_root, limit=limit, lang=lang)
         result["_fallback_reason"] = "vector index " + status["status"]
         result["index_status"] = status["status"]
@@ -374,6 +379,9 @@ def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Option
         "model": provider.model,
         "results": results,
         "count": len(results),
+        "index_status": status["status"],
+        **({"_note": "index behind the code: results from changed files may be outdated"}
+           if status["status"] != "ready" else {}),
     }
 
 

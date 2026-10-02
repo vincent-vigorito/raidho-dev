@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 import journal_policy as jp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sessions_index  # noqa: E402
 
 POLICY_DEFAULTS = {

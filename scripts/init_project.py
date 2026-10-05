@@ -356,6 +356,11 @@ def main() -> None:
         "INIT_MODE": args.mode,
     }
 
+    # gia' inizializzata (anche dal provisioning di Raidho): niente da fare
+    if (target / "meta.yaml").is_file():
+        print("wiki: presente")
+        return
+
     copy_template(template_dir, target)
     substitute_placeholders(target, replacements)
     _write_config_json(target)
@@ -375,6 +380,11 @@ def main() -> None:
         "USER_LANG": "it",
         "USER_TONE": "diretto e conciso",
     }
+    # un AGENTS.md dell'utente diventa AGENTS.src.md prima che write_triade metta il template,
+    # cosi' compose lo include invece di sovrascriverlo (CLAUDE.md lo salva gia' compose in .original.md)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from compose_claude_md import _migrate_source
+    _migrate_source(project_root)
     write_triade(project_root, triade_replacements)
     _register_raidho_memory_mcp(project_root)
     _regenerate_tools_md(project_root)

@@ -180,3 +180,88 @@ def test_agents_md_utente_con_src_gia_presente_non_va_perso(tmp_path):
     assert r.returncode == 0, r.stderr
     qui = {p.name: p.read_text() for p in project.glob("AGENTS*.md")}
     assert any("Regola 552" in t for t in qui.values()), qui.keys()
+
+
+# --- .raidhowiki a meta': cartella presente senza meta.yaml (init interrotto) ---
+
+INDEX_CUSTOM = "# Indice scritto a mano\n\n- [[nota-552]] non toccare\n"
+FILE_WIKI = ("meta.yaml", "wiki/index.md", "wiki/log.md", "wiki/overview.md")
+
+
+def wiki_a_meta(project: Path) -> Path:
+    """.raidhowiki con il solo wiki/index.md dell'utente: niente meta.yaml, log e overview."""
+    wiki = project / ".raidhowiki"
+    (wiki / "wiki").mkdir(parents=True)
+    (wiki / "wiki" / "index.md").write_text(INDEX_CUSTOM)
+    return wiki
+
+
+def test_wiki_a_meta_si_completa_senza_toccare_l_index_dell_utente(tmp_path):
+    project, home = prepara(tmp_path)
+    wiki = wiki_a_meta(project)
+    r = init(project, home)
+    assert r.returncode == 0, r.stderr
+    assert "wiki: presente" not in r.stdout
+    assert "[raidho] initialized" in r.stdout
+    assert (wiki / "wiki" / "index.md").read_text() == INDEX_CUSTOM
+    for f in FILE_WIKI:
+        assert (wiki / f).is_file(), f
+    assert "token:" in (wiki / "meta.yaml").read_text()
+    assert "{{" not in (wiki / "wiki" / "log.md").read_text()
+    for f in ("AGENTS.md", "AGENTS.src.md", "SOUL.md", "TOOLS.md", "CLAUDE.md"):
+        assert (project / f).is_file(), f
+
+
+def test_wiki_a_meta_non_sovrascrive_nessun_file_presente(tmp_path):
+    project, home = prepara(tmp_path)
+    wiki = wiki_a_meta(project)
+    (wiki / "wiki" / "overview.md").write_text("# Overview mia\n")
+    (wiki / "wiki" / "log.md").write_text("# Log mio\n")
+    extra = wiki / "wiki" / "concepts"
+    extra.mkdir()
+    (extra / "x.md").write_text("concetto 552\n")
+    mio = {f: (wiki / f).read_text() for f in ("wiki/index.md", "wiki/overview.md", "wiki/log.md", "wiki/concepts/x.md")}
+    r = init(project, home)
+    assert r.returncode == 0, r.stderr
+    assert {f: (wiki / f).read_text() for f in mio} == mio
+    assert (wiki / "meta.yaml").is_file()
+
+
+def test_wiki_a_meta_secondo_giro_presente_e_albero_identico(tmp_path):
+    project, home = prepara(tmp_path)
+    wiki_a_meta(project)
+    assert init(project, home).returncode == 0
+    prima = albero(project)
+    r = init(project, home)
+    assert (r.returncode, r.stdout.strip()) == (0, "wiki: presente")
+    assert albero(project) == prima
+
+
+def test_wiki_a_meta_con_agents_dell_utente_lo_conserva(tmp_path):
+    project, home = prepara(tmp_path)
+    wiki_a_meta(project)
+    (project / "AGENTS.md").write_text(AGENTS_UTENTE)
+    r = init(project, home)
+    assert r.returncode == 0, r.stderr
+    assert (project / "AGENTS.src.md").read_text() == AGENTS_UTENTE
+    assert "Regola 552" in (project / "AGENTS.md").read_text()
+    assert (project / ".raidhowiki" / "wiki" / "index.md").read_text() == INDEX_CUSTOM
+
+
+def test_wiki_a_meta_cartella_vuota_come_prima_volta(tmp_path):
+    project, home = prepara(tmp_path)
+    (project / ".raidhowiki").mkdir()
+    r = init(project, home)
+    assert r.returncode == 0, r.stderr
+    assert (project / ".raidhowiki" / "meta.yaml").is_file()
+    assert (project / ".raidhowiki" / "wiki" / "index.md").is_file()
+
+
+def test_wiki_a_meta_con_meta_yaml_ma_senza_wiki_resta_presente(tmp_path):
+    """Il criterio di 'fatta' e' meta.yaml: un file mancante diverso non rilancia l'init."""
+    project, home = prepara(tmp_path)
+    assert init(project, home).returncode == 0
+    (project / ".raidhowiki" / "wiki" / "overview.md").unlink()
+    r = init(project, home)
+    assert (r.returncode, r.stdout.strip()) == (0, "wiki: presente")
+    assert not (project / ".raidhowiki" / "wiki" / "overview.md").exists()

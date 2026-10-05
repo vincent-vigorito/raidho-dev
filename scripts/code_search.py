@@ -367,6 +367,8 @@ def search_level_2(query: str, project_root: Path, limit: int = 10, lang: Option
             "func_name": h["func_name"],
             "line_start": h["line_start"],
             "line_end": h["line_end"],
+            # pezzo di una riga oltre il tetto dei chunk: colonne 0-based, col_end escluso
+            **({"col_start": h["col_start"], "col_end": h["col_end"]} if h.get("col_start") is not None else {}),
             "lang": h["lang"],
             "distance": round(h["distance"], 4),
             "preview": h["content"][:300],

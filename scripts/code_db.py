@@ -32,7 +32,7 @@ from typing import Iterable, Optional
 
 CODE_DB_FILENAME = "code-index.db"   # solo il vecchio formato, per l'import
 REDIS_DEFAULT = "redis://127.0.0.1:6379/14"
-PIPELINE_VERSION = "3"
+PIPELINE_VERSION = "4"  # 4: chunk con tetto in caratteri e col_start/col_end
 VEC_METRIC = "cosine"
 KINDS = ("code", "wiki")
 

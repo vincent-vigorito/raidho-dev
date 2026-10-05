@@ -142,30 +142,68 @@ def _chunk_by_func_regex(text: str, lang: str, max_lines: int = 80) -> list[dict
     return chunks
 
 
+# Tetto per chunk: qwen3-embedding-8b accetta 32.768 token per input e nel codice minificato
+# un token vale anche meno di 2 caratteri; 12k caratteri restano sotto i 32k token anche a
+# 2 byte UTF-8 per carattere (al peggio un token per byte). 80 righe di codice normale ci stanno.
+MAX_CHUNK_CHARS = 12_000
+
+
+def _line_chunk(lines, start, end, **cols) -> dict:
+    """Righe 0-based [start, end) -> chunk con line_start/line_end 1-based."""
+    return {"func_name": None, "line_start": start + 1, "line_end": end,
+            "content": "\n".join(lines[start:end]), **cols}
+
+
+def _split_oversized(lines, start, end) -> list[dict]:
+    """Righe [start, end) in chunk da al massimo MAX_CHUNK_CHARS, senza overlap.
+
+    Le righe piu' lunghe del tetto vanno in pezzi con col_start/col_end: offset in
+    caratteri 0-based, col_end escluso (content == riga[col_start:col_end]).
+    """
+    chunks = []
+    first, size = start, -1
+    for i in range(start, end):
+        line = lines[i]
+        if first < i and size + 1 + len(line) > MAX_CHUNK_CHARS:
+            chunks.append(_line_chunk(lines, first, i))
+            first, size = i, -1
+        if len(line) > MAX_CHUNK_CHARS:
+            for col in range(0, len(line), MAX_CHUNK_CHARS):
+                piece = line[col:col + MAX_CHUNK_CHARS]
+                chunks.append({"func_name": None, "line_start": i + 1, "line_end": i + 1, "content": piece,
+                               "col_start": col, "col_end": col + len(piece)})
+            first, size = i + 1, -1
+        else:
+            size += 1 + len(line)
+    if first < end:
+        chunks.append(_line_chunk(lines, first, end))
+    return [c for c in chunks if c["content"].strip()]
+
+
 def _chunk_by_lines(text: str, max_lines: int = 80, overlap: int = 10) -> list[dict]:
-    """Fallback: sliding window per file non parsabili."""
+    """Fallback: sliding window per file non parsabili.
+
+    Una finestra oltre MAX_CHUNK_CHARS si spezza (_split_oversized) a partire dalla
+    prima riga non coperta dalla finestra precedente: niente pezzi giganti ripetuti.
+    """
     lines = text.split("\n")
     if len(lines) <= max_lines:
-        return [{
-            "func_name": None,
-            "line_start": 1,
-            "line_end": len(lines),
-            "content": text,
-        }]
+        windows = [(0, len(lines))]
+    else:
+        windows = []
+        for start in range(0, len(lines), max_lines - overlap):
+            windows.append((start, min(start + max_lines, len(lines))))
+            if windows[-1][1] >= len(lines):
+                break
     chunks = []
-    step = max_lines - overlap
-    for start in range(0, len(lines), step):
-        end = min(start + max_lines, len(lines))
-        content = "\n".join(lines[start:end])
-        if content.strip():
-            chunks.append({
-                "func_name": None,
-                "line_start": start + 1,
-                "line_end": end,
-                "content": content,
-            })
-        if end >= len(lines):
-            break
+    covered = 0
+    for start, end in windows:
+        chunk = _line_chunk(lines, start, end)
+        if len(chunk["content"]) > MAX_CHUNK_CHARS:
+            chunks.extend(_split_oversized(lines, max(start, covered), end))
+        elif chunk["content"].strip():
+            chunks.append(chunk)
+        covered = end
     return chunks
 
 

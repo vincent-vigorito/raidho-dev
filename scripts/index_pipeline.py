@@ -82,10 +82,28 @@ def refresh(root, kind, **kwargs):
 # oltre questi chunk da rifare l'indice si ricostruisce su chiavi nuove invece che in un'unica transazione
 REBUILD_CHUNKS = 3000
 
+# tetto ai caratteri di una richiesta di embedding, oltre ai batch_size chunk
+MAX_BATCH_CHARS = 200_000
+
+
+def _batches(staged, batch_size):
+    """Intervalli [start, end) di staged: al massimo batch_size chunk e MAX_BATCH_CHARS caratteri (almeno un chunk)."""
+    start = 0
+    while start < len(staged):
+        end, size = start, 0
+        while end < len(staged) and end - start < batch_size:
+            size += len(staged[end][2]["content"])
+            if end > start and size > MAX_BATCH_CHARS:
+                break
+            end += 1
+        yield start, end
+        start = end
+
 
 def _chunk_json(scope, path, chunk, info):
     return json.dumps({"file_path": path, "func_name": chunk["func_name"], "line_start": chunk["line_start"],
-                       "line_end": chunk["line_end"], "content": chunk["content"], "lang": chunk["lang"], "kind": scope,
+                       "line_end": chunk["line_end"], "col_start": chunk.get("col_start"), "col_end": chunk.get("col_end"),
+                       "content": chunk["content"], "lang": chunk["lang"], "kind": scope,
                        "last_modified": datetime.fromtimestamp(info["mtime_ns"] / 1e9, timezone.utc).isoformat(),
                        "content_sha": hashlib.sha256(chunk["content"].encode()).hexdigest(), "rev": info["hash"]})
 
@@ -204,8 +222,8 @@ def _refresh(root, kind, force=False, limit=None, include_sessions=False, single
             ids = list(range(fine - len(staged) + 1, fine + 1))
         vettori = {}
         indexed_chunks = 0
-        for start in range(0, len(staged), batch_size):
-            batch = staged[start:start + batch_size]
+        for start, end in _batches(staged, batch_size):
+            batch = staged[start:end]
             for scope in scopes:
                 admitted = {file_key(root, scope, path) for path in discover(root, scope, sessions, selected_single if scope == "wiki" else None)}
                 # file nuovi o cancellati sono lavoro normale; si ferma solo se la

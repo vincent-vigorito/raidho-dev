@@ -54,13 +54,18 @@ def verify(item, root, query):
     if not spans or not all(1 <= a <= b <= len(lines) for a, b in spans):
         raise InvalidEvidence('invalid_lines')
     evidence = ['\n'.join(lines[a - 1:b]) for a, b in spans]
+    cols = {k: item[k] for k in ('col_start', 'col_end') if k in item}
+    if cols:
+        if spans[0][0] != spans[0][1] or not 0 <= cols.get('col_start', -1) < cols.get('col_end', -1):
+            raise InvalidEvidence('invalid_lines')
+        evidence[0] = evidence[0][cols['col_start']:cols['col_end']]
     if vector:
         if evidence[0] != item.get('_indexed_content'):
             raise InvalidEvidence('index_content_mismatch')
     elif any(p['text'].rstrip('\r') != text.rstrip('\r') for p, text in zip(item['preview'], evidence)):
         raise InvalidEvidence('source_changed')
     return dict(source_revision=revision, revision_algorithm='sha256', freshness='verified_at_read',
-                spans=[dict(line_start=a, line_end=b) for a, b in spans],
+                spans=[dict(line_start=a, line_end=b, **cols) for a, b in spans],
                 match='literal' if any(query.casefold() in text.casefold() for text in evidence) else 'candidate')
 
 

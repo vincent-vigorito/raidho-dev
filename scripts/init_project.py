@@ -13,6 +13,7 @@ Usato dal comando `/raidho-init`. Solo stdlib (niente dipendenze).
 """
 
 import argparse
+import os
 import secrets
 import shutil
 import sys
@@ -301,16 +302,25 @@ def make_claude_md_symlink(project_root: Path) -> None:
     pass
 
 
-def copy_template(src: Path, dst: Path) -> None:
-    if dst.exists():
-        sys.exit(f"ERROR: target already exists: {dst}")
-    shutil.copytree(src, dst)
+def copy_template(src: Path, dst: Path) -> set[str]:
+    """Copia il template in dst. Se dst esiste gia' (init interrotto, senza meta.yaml) copia solo
+    i file che mancano, senza sovrascrivere quelli presenti. Ritorna i file copiati (relativi a dst)."""
+    copied: set[str] = set()
+
+    def _copy_if_missing(s: str, d: str) -> str:
+        if not os.path.lexists(d):
+            shutil.copy2(s, d)
+            copied.add(Path(d).relative_to(dst).as_posix())
+        return d
+
+    shutil.copytree(src, dst, copy_function=_copy_if_missing, dirs_exist_ok=True)
+    return copied
 
 
-def substitute_placeholders(target: Path, replacements: dict[str, str]) -> None:
+def substitute_placeholders(target: Path, replacements: dict[str, str], only: set[str] | None = None) -> None:
     for rel in PLACEHOLDER_FILES:
         f = target / rel
-        if not f.is_file():
+        if not f.is_file() or (only is not None and rel not in only):
             continue
         text = f.read_text(encoding="utf-8")
         for key, val in replacements.items():
@@ -361,8 +371,8 @@ def main() -> None:
         print("wiki: presente")
         return
 
-    copy_template(template_dir, target)
-    substitute_placeholders(target, replacements)
+    copied = copy_template(template_dir, target)
+    substitute_placeholders(target, replacements, only=copied)
     _write_config_json(target)
     _write_schema_version(target)
 

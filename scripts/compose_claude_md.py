@@ -249,6 +249,9 @@ def compose(target: Path, dry_run: bool = False, quiet: bool = False) -> int:
         print(f"[dry-run] would write {agents_path} ({len(composed)} bytes) + {claude_path} (wrapper @AGENTS.md)")
         return 0
 
+    # AGENTS.md symlink (si scriverebbe nel file a cui punta) o dell'utente rimasto accanto a un
+    # AGENTS.src.md gia' presente: via il link, il file dell'utente in AGENTS.original.md
+    _backup_if_user_file(agents_path, quiet=quiet)
     _backup_if_user_file(claude_path, quiet=quiet)  # vecchio CLAUDE.md composed/utente
     agents_path.write_text(composed, encoding="utf-8")
     claude_path.write_text(wrapper, encoding="utf-8")

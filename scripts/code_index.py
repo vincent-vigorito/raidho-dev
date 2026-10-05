@@ -143,8 +143,9 @@ def _chunk_by_func_regex(text: str, lang: str, max_lines: int = 80) -> list[dict
 
 
 # Tetto per chunk: qwen3-embedding-8b accetta 32.768 token per input e nel codice minificato
-# un token vale anche meno di 2 caratteri; 12k caratteri restano sotto i 32k token anche a
-# 2 byte UTF-8 per carattere (al peggio un token per byte). 80 righe di codice normale ci stanno.
+# un token vale anche meno di 2 caratteri; 12k caratteri restano sotto i 32k token anche
+# contando un token per byte, finche' il testo e' ASCII o a 2 byte UTF-8 per carattere
+# (con soli caratteri a 3-4 byte il caso peggiore lo supera). 80 righe di codice normale ci stanno.
 MAX_CHUNK_CHARS = 12_000
 
 

@@ -206,7 +206,8 @@ def test_wiki_a_meta_si_completa_senza_toccare_l_index_dell_utente(tmp_path):
     assert (wiki / "wiki" / "index.md").read_text() == INDEX_CUSTOM
     for f in FILE_WIKI:
         assert (wiki / f).is_file(), f
-    assert "token:" in (wiki / "meta.yaml").read_text()
+    meta = (wiki / "meta.yaml").read_text()
+    assert 'name: "progetto"' in meta and "{{" not in meta
     assert "{{" not in (wiki / "wiki" / "log.md").read_text()
     for f in ("AGENTS.md", "AGENTS.src.md", "SOUL.md", "TOOLS.md", "CLAUDE.md"):
         assert (project / f).is_file(), f

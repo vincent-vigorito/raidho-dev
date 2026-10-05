@@ -1,4 +1,5 @@
 """RAI-534: tetto in caratteri sui chunk dell'indice semantico (righe lunghissime spezzate per colonna)."""
+import hashlib
 import json
 import os
 import random
@@ -12,10 +13,10 @@ from _helpers import cov_env
 from test_embed_mock import redis_usable
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-REPO = Path(__file__).resolve().parents[2]
 PYTHON = os.environ.get("RAIDHO_TEST_PYTHON", sys.executable)
 sys.path.insert(0, str(SCRIPTS))
 import code_index  # noqa: E402
+import search_evidence  # noqa: E402
 
 CAP = code_index.MAX_CHUNK_CHARS
 OLD_KEYS = ("func_name", "line_start", "line_end", "content")
@@ -180,17 +181,72 @@ def test_regression_short_file_single_chunk():
     assert old_fields(code_index.chunk_text(text, ".txt")) == [(None, 1, 3, "a\nb\nc")]
 
 
-# --- 4. file minificati reali del repo ---------------------------------------------------------
+# --- 4. file minificati ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("rel", ["static/js/sw_front.min.js", "static/js/vue.min.js"])
-def test_real_minified_files(rel):
-    path = REPO / rel
-    assert path.is_file(), path
-    text = path.read_text(encoding="utf-8", errors="replace")
+def minified_js(seed):
+    """Come un bundle minificato: una riga enorme di funzioni concatenate e qualche riga corta."""
+    rnd = random.Random(seed)
+    parts, size = [], 0
+    while size < 260_000:
+        name = "".join(rnd.choice(string.ascii_letters) for _ in range(rnd.randint(1, 3)))
+        part = f"var {name}=function(t,e){{return t&&e?{name}(t-1,e)+'{noise(rnd.randint(5, 60), size)}':null}};"
+        parts.append(part)
+        size += len(part)
+    return "/*! bundle v1 */\n" + "".join(parts) + "\n" + "!function(){" + noise(40_000, seed) + "}();\n"
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_minified_files(tmp_path, seed):
+    path = tmp_path / "bundle.min.js"
+    path.write_text(minified_js(seed), encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     chunks = code_index.chunk_file(path)
     assert len(chunks) > 1
     assert_capped(chunks)
     assert_exact_cover(text.removesuffix("\n"), chunks)
+    assert any(c["line_start"] == 2 and c.get("col_start") is not None for c in chunks)
+
+
+# --- 4b. evidenze di code.search sui pezzi di riga ---------------------------------------------
+
+def column_hit(root, col_start, col_end, content, **extra):
+    return {"level": 2, "results": [{"path": "app.min.js", "line_start": 2, "line_end": 2, "preview": content,
+                                     "col_start": col_start, "col_end": col_end, "_indexed_content": content,
+                                     "_indexed_revision": hashlib.sha256((root / "app.min.js").read_bytes()).hexdigest(),
+                                     **extra}]}
+
+
+def write_min(root):
+    line = noise(30_000, 3)
+    (root / "app.min.js").write_text("// header\n" + line + "\n")
+    return line
+
+
+def test_evidence_accepts_column_piece(tmp_path):
+    line = write_min(tmp_path)
+    piece = line[12_000:24_000]
+    checked = search_evidence.finalize(column_hit(tmp_path, 12_000, 24_000, piece), tmp_path, piece[100:120], 100_000)
+    assert checked["count"] == 1, checked["evidence"]
+    evidence = checked["results"][0]["evidence"]
+    assert evidence["spans"] == [{"line_start": 2, "line_end": 2, "col_start": 12_000, "col_end": 24_000}]
+    assert evidence["match"] == "literal"
+
+
+def test_evidence_rejects_tampered_column_piece(tmp_path):
+    line = write_min(tmp_path)
+    tampered = line[:12_000] + "#" + line[12_001:]
+    (tmp_path / "app.min.js").write_text("// header\n" + tampered + "\n")
+    hit = column_hit(tmp_path, 12_000, 24_000, line[12_000:24_000])
+    assert search_evidence.finalize(hit, tmp_path, "x", 100)["evidence"]["rejected"] == [
+        {"reason": "index_content_mismatch"}]
+
+
+@pytest.mark.parametrize("cols,lines", [((5, 5), (2, 2)), ((9, 3), (2, 2)), ((0, 10), (1, 2))])
+def test_evidence_rejects_invalid_columns(tmp_path, cols, lines):
+    line = write_min(tmp_path)
+    hit = column_hit(tmp_path, *cols, line[cols[0]:cols[1]])
+    hit["results"][0]["line_start"], hit["results"][0]["line_end"] = lines
+    assert search_evidence.finalize(hit, tmp_path, "x", 100)["evidence"]["rejected"] == [{"reason": "invalid_lines"}]
 
 
 # --- 5. pipeline end-to-end con provider mock --------------------------------------------------

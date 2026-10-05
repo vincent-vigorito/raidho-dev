@@ -15,6 +15,13 @@ Argomenti: `$ARGUMENTS`
 Verifica che `.raidhowiki/meta.yaml` esista nella cwd:
 - Se no: errore "Wiki non inizializzato. Lancia `/raidho-init` prima." e termina.
 
+Se `.raidhowiki/config.json` ha `"roadmap": "raidho"` la roadmap e' generata da Raidho
+dai task del progetto ed e' in sola lettura (i tool di scrittura rispondono
+`roadmap_read_only`): valgono solo `list` e `triage`. Per `add` e `done` rispondi
+"La roadmap e' generata da Raidho dai task: crea o aggiorna il task con
+`raidho_team.py task ...` (agenti del team) o chiedilo all'orchestratore." e termina;
+in `triage` le azioni proposte sono sui task, non sulla roadmap.
+
 ## Sub-command routing
 
 Parsa il primo token di `$ARGUMENTS`:

@@ -370,7 +370,19 @@ def write_session_file(sessions_root: Path, kind: str, session_meta: dict, trans
     lines.append("")
 
     session_file.write_text("\n".join(lines), encoding="utf-8")
+    if kind == "project":
+        update_sessions_index(sessions_root.parent)
     return session_file
+
+
+def update_sessions_index(wiki: Path) -> None:
+    """Best-effort: sezione Sessions di index.md (scripts/sessions_index.py)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import sessions_index
+        sessions_index.update(wiki)
+    except Exception as e:
+        print(f"[raidho] WARNING: sessions index update failed: {e}", file=sys.stderr)
 
 
 def best_effort_post_session_hooks(project_root: Path) -> None:

@@ -46,6 +46,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 import journal_policy as jp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sessions_index  # noqa: E402
 
 POLICY_DEFAULTS = {
     "archive_short_after_days": 14,      # short (< 3 msg o < 5 min) → archive
@@ -308,6 +310,11 @@ def run(root: Path, apply: bool, purge_machine: bool, older_than: int | None = N
             if d.is_dir() and d.name != "archive" and not any(d.iterdir()):
                 shutil.rmtree(d, ignore_errors=True)
         mark_last_compact(root)
+        if sroot == root / ".raidhowiki" / "wiki" / "sessions":
+            try:
+                sessions_index.update(sroot.parent)
+            except Exception as e:
+                rep["errors"].append(f"sessions index: {e}")
     return rep
 
 

@@ -37,7 +37,8 @@ def collect_pages(wiki_root: Path) -> dict:
         d = wiki_root / sub
         if not d.is_dir():
             continue
-        for f in d.glob("*.md"):
+        # sessions: journal in sessions/<data>/ e sessions/archive/<data>/
+        for f in (d.rglob("*.md") if sub == "sessions" else d.glob("*.md")):
             pages[f.stem] = (f, sub)
     for name in ROOT_PAGES:
         f = wiki_root / f"{name}.md"

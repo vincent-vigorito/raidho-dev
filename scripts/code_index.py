@@ -44,6 +44,7 @@ LANG_BY_EXT = {
     ".sh": "bash", ".bash": "bash",
     ".sql": "sql",
     ".md": "markdown",  # docs come "code-like" search
+    ".html": "html", ".vue": "vue",
 }
 
 EXCLUDE_DIR_NAMES = {

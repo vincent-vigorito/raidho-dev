@@ -16,6 +16,7 @@ DEFAULT_MODELS = {'openrouter': 'openai/text-embedding-3-small', 'openai': 'text
                   'voyage': 'voyage-code-3', 'local': 'BAAI/bge-small-en', 'mock': 'mock-bow', 'none': None}
 SENSITIVE = ('*.pem', '*.key', '*.p12', '*.pfx', '*.sqlite*', '*.db', 'credentials.*', 'secrets.*', '*_credentials.*', '*_secrets.*',
              'id_rsa*', 'id_ed25519*', '*.local.*', 'transcript*.json*')
+GENERATED = ('*.min.js', '*.min.mjs', '*-min.js', '*.bundle.js')
 
 
 class PolicyError(ValueError):
@@ -94,9 +95,22 @@ def ignored(root, paths):
         raidho_ignored = {}
         rules = root / '.raidhoignore'
         if rules.is_file():
-            output = _git(isolated + ['ls-files', '--others', '--ignored', '--exclude-from=' + str(rules), '-z'], cwd=root)
+            # work-tree vuoto: valgono solo le regole di .raidhoignore, anche dentro i submodule
+            empty = Path(temp) / 'empty'
+            empty.mkdir()
+            output = _git(['git', '--git-dir=' + gitdir, '--work-tree=' + str(empty), '-c', 'core.bare=false', '-c', 'core.excludesFile=' + str(rules),
+                           'check-ignore', '--no-index', '-z', '--stdin'], input=raw_paths, cwd=empty)
             raidho_ignored = {os.fsdecode(p): 'raidhoignore' for p in output.split(b'\0') if p}
         return git_ignored, raidho_ignored
+
+
+def gitlinks(root):
+    """Submodule tracciati dal repository del progetto (mode 160000), relativi a root."""
+    try:
+        result = subprocess.run(['git', '-C', str(root), 'ls-files', '-s', '-z'], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {os.fsdecode(e.split(b'\t', 1)[1]) for e in result.stdout.split(b'\0') if e.startswith(b'160000 ')} if result.returncode == 0 else set()
 
 
 def _literal_match(path, patterns):
@@ -119,12 +133,13 @@ def discover(root, kind='code', include_sessions=False, single=None):
         entries = [path] if path.is_file() else []
     else:
         entries = []
+        links = gitlinks(root) if kind == 'code' else set()
         def fail(error):
             raise error
         for directory, dirs, names in os.walk(base, onerror=fail):
             for name in list(dirs):
                 path = Path(directory) / name
-                if name.startswith('.') or name in code_index.EXCLUDE_DIR_NAMES or path.is_symlink() or (path / '.git').exists() or (kind == 'wiki' and not include_sessions and name == 'sessions'):
+                if name.startswith('.') or name in code_index.EXCLUDE_DIR_NAMES or path.is_symlink() or ((path / '.git').exists() and str(path.relative_to(root)) not in links) or (kind == 'wiki' and not include_sessions and name == 'sessions'):
                     reject(path, 'symlink' if path.is_symlink() else 'default_directory')
                     dirs.remove(name)
             dirs.sort()
@@ -135,6 +150,8 @@ def discover(root, kind='code', include_sessions=False, single=None):
             reject(path, 'symlink')
         elif path.name.startswith('.') or any(fnmatch.fnmatch(path.name.lower(), p) for p in SENSITIVE):
             reject(path, 'sensitive_or_hidden')
+        elif any(fnmatch.fnmatch(path.name.lower(), p) for p in GENERATED):
+            reject(path, 'generated')
         elif (kind == 'code' and path.suffix.lower() not in code_index.LANG_BY_EXT) or (kind == 'wiki' and path.suffix != '.md'):
             reject(path, 'unsupported_type')
         elif _literal_match(rel, cfg.get('exclude', [])):

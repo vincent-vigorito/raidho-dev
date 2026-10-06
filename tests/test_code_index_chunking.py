@@ -263,7 +263,7 @@ _base = code_db.base_key(root / '.raidhowiki')
 atexit.register(lambda: [_r.delete(k) for k in _r.scan_iter(_base + '*')])
 (root / '.raidhowiki/wiki').mkdir(parents=True)
 lines = ['var a' + str(i) + '="' + ('q%dw ' % i) * 30_000 + '";' for i in range(3)]
-(root / 'long.min.js').write_text('\n'.join(lines))
+(root / 'long.js').write_text('\n'.join(lines))
 (root / 'small.py').write_text('def f():\n    return 1\n')
 cap = code_index.MAX_CHUNK_CHARS
 batch_cap = getattr(pipeline, 'MAX_BATCH_CHARS', None)
@@ -280,7 +280,7 @@ r = pipeline.refresh(root, kind='code')
 assert r['status'] == 'ready', r
 idx = code_db.open_db(root / '.raidhowiki', dim=p.dim, allow_dimension_mismatch=True)
 stored = [json.loads(raw) for _f, raw in _r.hscan_iter(idx.k('chunks'), count=1000)]
-long_chunks = [c for c in stored if c['file_path'] == 'long.min.js']
+long_chunks = [c for c in stored if c['file_path'] == 'long.js']
 assert len(long_chunks) > 3, len(long_chunks)
 assert all(c.get('col_start') is not None and c.get('col_end') is not None for c in long_chunks), long_chunks[0].keys()
 for n, line in enumerate(lines, 1):

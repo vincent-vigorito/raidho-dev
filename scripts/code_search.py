@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """code_search.py — ricerca nel codebase ospitante via 3 livelli.
 
-Level 0: ripgrep + smart ranking (count + filename boost + recency)
+Level 0: ripgrep (git grep se rg manca) + smart ranking (count + filename boost + recency)
 Level 1: ripgrep top-50 + LLM haiku rerank semantico
 Level 2: vector search su Redis (Vector Sets) + embed provider
 
@@ -18,6 +18,7 @@ Stdlib + subprocess `rg` + lazy import code_db/embed_providers per level 2.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -133,6 +134,42 @@ def _ripgrep_search(query: str, root: Path, limit: int = 50, lang: Optional[str]
     return matches
 
 
+def _git_grep_search(query: str, root: Path, limit: int = 50, lang: Optional[str] = None) -> list[dict]:
+    """Ripiego senza ripgrep: `git grep --no-index` rispetta .gitignore (anche fuori da un repo)
+    e, come rg, salta file e cartelle nascosti, quindi niente segreti gitignored nei risultati."""
+    cmd = ["git", "-C", str(root), "grep", "--no-index", "--exclude-standard", "-z", "-n", "-I", "-E"]
+    if query == query.lower():
+        cmd.append("-i")  # come --smart-case di rg
+    cmd += ["-e", query, "--"]
+    if lang:
+        from code_index import LANG_BY_EXT
+        cmd += [f":(glob)**/*{ext}" for ext, name in LANG_BY_EXT.items() if name == lang] or [f":(glob)**/*.{lang}"]
+    else:
+        cmd.append(".")
+    cmd += [f":(exclude,glob){g}" for g in ("**/.*", "**/.*/**", *(f"**/{g}" for g in EXCLUDE_GLOBS))]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=15, text=True, errors="replace")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+    matches = []
+    per_file: dict[str, int] = {}
+    for line in result.stdout.split("\n"):
+        try:
+            path, line_no, text = line.split("\0", 2)
+            line_no = int(line_no)
+        except ValueError:
+            continue
+        if per_file.get(path, 0) >= 20:  # come --max-count=20 di rg
+            continue
+        per_file[path] = per_file.get(path, 0) + 1
+        matches.append({"path": str(root / path), "line": line_no, "text": text})
+        if len(matches) >= limit:
+            break
+    return matches
+
+
 def _git_recency(path: str, root: Path) -> float:
     """Boost basato su recency del file via git log. Restituisce [0, 1]."""
     try:
@@ -185,8 +222,9 @@ def _smart_rank(matches: list[dict], query: str, root: Path) -> list[dict]:
 
 
 def search_level_0(query: str, root: Path, limit: int = 20, lang: Optional[str] = None) -> dict:
-    """ripgrep + smart ranking. Restituisce top file con match preview."""
-    raw_matches = _ripgrep_search(query, root, limit=200, lang=lang)
+    """ripgrep (o git grep se rg manca) + smart ranking. Restituisce top file con match preview."""
+    rg = shutil.which("rg") is not None
+    raw_matches = (_ripgrep_search if rg else _git_grep_search)(query, root, limit=200, lang=lang)
     ranked = _smart_rank(raw_matches, query, root)
 
     results = []
@@ -198,7 +236,10 @@ def search_level_0(query: str, root: Path, limit: int = 20, lang: Optional[str] 
             "match_count": len(entry["matches"]),
             "preview": entry["matches"][:3],  # top 3 match per file
         })
-    return {"level": 0, "method": "ripgrep_smart_rank", "results": results, "count": len(results)}
+    if rg:
+        return {"level": 0, "method": "ripgrep_smart_rank", "results": results, "count": len(results)}
+    return {"level": 0, "method": "git_grep_smart_rank", "results": results, "count": len(results),
+            "_ripgrep_missing": "ripgrep (rg) not installed: literal search done with git grep"}
 
 
 # ============================================================

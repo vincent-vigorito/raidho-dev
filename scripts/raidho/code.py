@@ -160,7 +160,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Query keyword o semantica"},
-                "smart_level": {"type": "integer", "enum": [0, 1, 2], "description": "Override default auto-detect"},
+                # minimum/maximum e non enum: Gemini accetta solo enum di stringhe e rifiuta il turno (400)
+                "smart_level": {"type": "integer", "minimum": 0, "maximum": 2, "description": "Override default auto-detect"},
                 "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
                 "max_preview_chars": {"type": "integer", "default": 12000, "minimum": 0, "maximum": 100000,
                                       "description": "Budget totale caratteri delle anteprime; metadati esclusi"},

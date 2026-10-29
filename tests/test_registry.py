@@ -33,6 +33,7 @@ def load_server(root: Path, groups: str = ""):
     os.environ["RAIDHO_SCOPE"] = "project"
     os.environ["RAIDHO_ROOT"] = str(root)
     os.environ["RAIDHO_TOOL_GROUPS"] = groups
+    os.environ.pop("RAIDHO_AGENT", None)  # D6: con RAIDHO_AGENT il gruppo skills non c'e'
     spec = importlib.util.spec_from_file_location(f"raidho_srv_{abs(hash(groups))}", SERVER)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

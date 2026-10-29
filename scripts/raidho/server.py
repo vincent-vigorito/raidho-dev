@@ -50,14 +50,21 @@ _ALLOWED_CACHE: Optional[set] = None
 
 def _allowed_tool_names() -> set:
     """Filter set basato su env RAIDHO_TOOL_GROUPS (calcolato una volta). Vuoto = tutti i core.
-    Gruppo hub spostato o sconosciuto → warning su stderr, ignorato (mai crash)."""
+    Gruppo hub spostato o sconosciuto → warning su stderr, ignorato (mai crash).
+    Negli agenti di Raidho (RAIDHO_AGENT non vuoto) il gruppo skills non c'e' mai: le skill
+    le consegna Raidho; le sessioni locali hanno RAIDHO_AGENT vuoto e lo tengono."""
     global _ALLOWED_CACHE
-    if _ALLOWED_CACHE is not None:
-        return _ALLOWED_CACHE
+    if _ALLOWED_CACHE is None:
+        _ALLOWED_CACHE = _groups_names()
+        if os.environ.get("RAIDHO_AGENT", "").strip():
+            _ALLOWED_CACHE -= set(TOOL_GROUPS.get("skills", ()))
+    return _ALLOWED_CACHE
+
+
+def _groups_names() -> set:
     raw = os.environ.get("RAIDHO_TOOL_GROUPS", "").strip()
     if not raw:
-        _ALLOWED_CACHE = {t for g in TOOL_GROUPS.values() for t in g}
-        return _ALLOWED_CACHE
+        return {t for g in TOOL_GROUPS.values() for t in g}
     names = set()
     for g in [x.strip() for x in raw.split(",") if x.strip()]:
         if g in TOOL_GROUPS:
@@ -68,7 +75,6 @@ def _allowed_tool_names() -> set:
         else:
             print(f"[raidho_memory] WARN RAIDHO_TOOL_GROUPS: gruppo '{g}' sconosciuto (ignorato); "
                   f"validi: {','.join(TOOL_GROUPS)}", file=sys.stderr, flush=True)
-    _ALLOWED_CACHE = names
     return names
 
 

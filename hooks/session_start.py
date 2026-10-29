@@ -115,7 +115,10 @@ def _print_skills_catalog(root: Path, kind: str) -> None:
     """Stampa Level 0 catalog skill (project + user-global) per injection nel context.
 
     Hermes-aligned: la lista è ~5-15 righe, body completo via tool skill.load on-demand.
+    Non negli agenti di Raidho (RAIDHO_AGENT non vuoto): li' skill.load non c'e'.
     """
+    if os.environ.get("RAIDHO_AGENT", "").strip():
+        return
     try:
         scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
         if str(scripts_dir) not in sys.path:

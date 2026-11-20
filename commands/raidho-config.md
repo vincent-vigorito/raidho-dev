@@ -10,6 +10,8 @@ Workflow guidato per settare embed provider/model. Scrive direttamente nel `.mcp
 
 Argomenti: `$ARGUMENTS`
 
+**Negli agenti di Raidho** (variabile `RAIDHO_AGENT` non vuota) non usare questo comando: provider, modello e chiave della ricerca semantica si configurano nella UI di Raidho (Project settings → Container → Semantic search) e non si chiede mai all'utente di lanciare comandi nel container (niente `export`, `.zshrc`, `.secrets.env` o restart da fare a mano). Se la configurazione manca, dillo all'orchestratore e fermati.
+
 Sub-command:
 - `embed` (default se vuoto) — config provider + model per ricerca semantica
 - `show` — stampa la config corrente senza modifiche

@@ -169,7 +169,10 @@ def _suggest_raidho_init(cwd: Path) -> None:
     - cwd è $HOME o root dir
     - già nudgato per quel cwd
     - non sembra un progetto (no .git, no file di codice)
+    - agente di Raidho (RAIDHO_AGENT non vuoto): la wiki la crea Raidho, l'utente non lancia comandi nel container
     """
+    if os.environ.get("RAIDHO_AGENT", "").strip():
+        return
     import hashlib
     cwd = cwd.resolve()
     if cwd == Path.home() or str(cwd) == "/":

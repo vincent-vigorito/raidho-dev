@@ -53,3 +53,21 @@ def test_retry_after_corto_attese_crescenti_fino_al_tetto(monkeypatch):
     assert data == {'data': [{'embedding': [0.3]}]}
     assert len(chiamate) == 9
     assert attese == [2.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
+def test_timeout_riprovato_poi_200(monkeypatch):
+    chiamate, attese = [], []
+    client = httpx.Client
+
+    def gestore(request):
+        chiamate.append(request)
+        if len(chiamate) == 1:
+            raise httpx.ReadTimeout('The read operation timed out', request=request)
+        return httpx.Response(200, json={'data': [{'embedding': [0.4]}]})
+
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: client(transport=httpx.MockTransport(gestore), **kw))
+    monkeypatch.setattr(embed_providers.time, 'sleep', attese.append)
+    data = embed_providers._http_post_json(URL, {}, {'model': 'm', 'input': ['x']})
+    assert data == {'data': [{'embedding': [0.4]}]}
+    assert len(chiamate) == 2
+    assert attese == [1.0]

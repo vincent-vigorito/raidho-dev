@@ -73,7 +73,7 @@ def _retry_after(resp) -> Optional[float]:
 def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -> dict:
     """POST JSON via httpx (lazy import). Restituisce dict response.
 
-    Su 429/503 riprova con backoff 1, 2, 4 ... s, mai sotto l'attesa indicata dal provider
+    Su 429/503 e timeout riprova con backoff 1, 2, 4 ... s, mai sotto l'attesa indicata dal provider
     (tetto _RIPROVA_MAX_S): il retry_after di Nebius (1-2 s) e' piu' corto della finestra vera
     del limite. Ogni riprova una riga su stderr; finiti i tentativi solleva l'errore."""
     try:
@@ -82,10 +82,19 @@ def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -
         raise RuntimeError("httpx required for API embedding providers. Install: pip install httpx") from None
     with httpx.Client(timeout=timeout) as client:
         for tentativo in range(_RIPROVA_TENTATIVI):
-            resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code in _RIPROVA_STATUS and tentativo < _RIPROVA_TENTATIVI - 1:
-                attesa = min(max(_retry_after(resp) or 0.0, 2.0 ** tentativo), _RIPROVA_MAX_S)
-                print(f"embedding: HTTP {resp.status_code}, riprovo tra {attesa:g} s "
+            riprova = tentativo < _RIPROVA_TENTATIVI - 1
+            try:
+                resp = client.post(url, headers=headers, json=payload)
+            except httpx.TimeoutException:
+                # sotto il limite il provider puo' tenere la richiesta oltre il timeout invece del 429
+                if not riprova:
+                    raise
+                resp = None
+            if resp is None or (resp.status_code in _RIPROVA_STATUS and riprova):
+                dichiarata = None if resp is None else _retry_after(resp)
+                attesa = min(max(dichiarata or 0.0, 2.0 ** tentativo), _RIPROVA_MAX_S)
+                motivo = "timeout" if resp is None else f"HTTP {resp.status_code}"
+                print(f"embedding: {motivo}, riprovo tra {attesa:g} s "
                       f"({tentativo + 1}/{_RIPROVA_TENTATIVI - 1})", file=sys.stderr, flush=True)
                 time.sleep(attesa)
                 continue

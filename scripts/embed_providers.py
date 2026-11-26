@@ -14,8 +14,11 @@ RAIDHO_EMBED_API_KEY. Model override via RAIDHO_EMBED_MODEL.
 Stdlib + `httpx` per API providers. Sentence-transformers solo se `local`.
 """
 
+import math
 import os
 import sys
+import time
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
 # ============================================================
@@ -41,18 +44,52 @@ class EmbedProvider:
 # API providers (HTTP)
 # ============================================================
 
+_RIPROVA_STATUS = (429, 503)
+_RIPROVA_TENTATIVI = 6  # 5 riprove dopo la prima chiamata
+_RIPROVA_MAX_S = 30.0
+
+
+def _retry_after(resp) -> Optional[float]:
+    """Secondi di attesa chiesti dal provider: header Retry-After (secondi o data HTTP) o
+    error.metadata.retry_after_seconds nel corpo (OpenRouter). None se non li indica."""
+    secondi = None
+    valore = resp.headers.get("retry-after", "").strip()
+    if valore:
+        try:
+            secondi = float(valore)
+        except ValueError:
+            try:
+                secondi = parsedate_to_datetime(valore).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    if secondi is None:
+        try:
+            secondi = float(resp.json()["error"]["metadata"]["retry_after_seconds"])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+    return secondi if math.isfinite(secondi) and secondi >= 0 else None
+
+
 def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -> dict:
-    """POST JSON via httpx (lazy import). Restituisce dict response."""
+    """POST JSON via httpx (lazy import). Restituisce dict response.
+
+    Su 429/503 riprova dopo l'attesa indicata dal provider (tetto _RIPROVA_MAX_S) o, senza
+    indicazione, con backoff 1, 2, 4, 8, 16 s; finiti i tentativi solleva l'errore."""
     try:
         import httpx  # noqa
     except ImportError:
         raise RuntimeError("httpx required for API embedding providers. Install: pip install httpx") from None
     with httpx.Client(timeout=timeout) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        if resp.is_error:
-            # il motivo sta nel corpo (modello, input troppo lungo, credito): senza non si capisce
-            raise RuntimeError(f"HTTP {resp.status_code} from {url}: {resp.text[:500]}")
-        return resp.json()
+        for tentativo in range(_RIPROVA_TENTATIVI):
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code in _RIPROVA_STATUS and tentativo < _RIPROVA_TENTATIVI - 1:
+                attesa = _retry_after(resp)
+                time.sleep(min(2 ** tentativo if attesa is None else attesa, _RIPROVA_MAX_S))
+                continue
+            if resp.is_error:
+                # il motivo sta nel corpo (modello, input troppo lungo, credito): senza non si capisce
+                raise RuntimeError(f"HTTP {resp.status_code} from {url}: {resp.text[:500]}")
+            return resp.json()
 
 
 class OpenRouterProvider(EmbedProvider):

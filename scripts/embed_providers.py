@@ -45,8 +45,8 @@ class EmbedProvider:
 # ============================================================
 
 _RIPROVA_STATUS = (429, 503)
-_RIPROVA_TENTATIVI = 6  # 5 riprove dopo la prima chiamata
-_RIPROVA_MAX_S = 30.0
+_RIPROVA_TENTATIVI = 10  # 9 riprove dopo la prima chiamata, circa 4 minuti di attese in tutto
+_RIPROVA_MAX_S = 60.0
 
 
 def _retry_after(resp) -> Optional[float]:
@@ -73,8 +73,9 @@ def _retry_after(resp) -> Optional[float]:
 def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -> dict:
     """POST JSON via httpx (lazy import). Restituisce dict response.
 
-    Su 429/503 riprova dopo l'attesa indicata dal provider (tetto _RIPROVA_MAX_S) o, senza
-    indicazione, con backoff 1, 2, 4, 8, 16 s; finiti i tentativi solleva l'errore."""
+    Su 429/503 riprova con backoff 1, 2, 4 ... s, mai sotto l'attesa indicata dal provider
+    (tetto _RIPROVA_MAX_S): il retry_after di Nebius (1-2 s) e' piu' corto della finestra vera
+    del limite. Ogni riprova una riga su stderr; finiti i tentativi solleva l'errore."""
     try:
         import httpx  # noqa
     except ImportError:
@@ -83,8 +84,10 @@ def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60) -
         for tentativo in range(_RIPROVA_TENTATIVI):
             resp = client.post(url, headers=headers, json=payload)
             if resp.status_code in _RIPROVA_STATUS and tentativo < _RIPROVA_TENTATIVI - 1:
-                attesa = _retry_after(resp)
-                time.sleep(min(2 ** tentativo if attesa is None else attesa, _RIPROVA_MAX_S))
+                attesa = min(max(_retry_after(resp) or 0.0, 2.0 ** tentativo), _RIPROVA_MAX_S)
+                print(f"embedding: HTTP {resp.status_code}, riprovo tra {attesa:g} s "
+                      f"({tentativo + 1}/{_RIPROVA_TENTATIVI - 1})", file=sys.stderr, flush=True)
+                time.sleep(attesa)
                 continue
             if resp.is_error:
                 # il motivo sta nel corpo (modello, input troppo lungo, credito): senza non si capisce

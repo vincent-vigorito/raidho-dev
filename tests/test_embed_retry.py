@@ -43,3 +43,13 @@ def test_429_a_oltranza_errore_dopo_i_tentativi(monkeypatch):
         embed_providers._http_post_json(URL, {}, {'model': 'm', 'input': ['x']})
     assert len(chiamate) == embed_providers._RIPROVA_TENTATIVI
     assert attese == [embed_providers._RIPROVA_MAX_S] * (embed_providers._RIPROVA_TENTATIVI - 1)
+
+
+def test_retry_after_corto_attese_crescenti_fino_al_tetto(monkeypatch):
+    # Nebius dichiara 2 s ma il limite dura di piu': le attese crescono oltre quella dichiarata
+    chiamate, attese = provider_finto(monkeypatch, [httpx.Response(429, json=LIMITE)] * 8
+                                      + [httpx.Response(200, json={'data': [{'embedding': [0.3]}]})])
+    data = embed_providers._http_post_json(URL, {}, {'model': 'm', 'input': ['x']})
+    assert data == {'data': [{'embedding': [0.3]}]}
+    assert len(chiamate) == 9
+    assert attese == [2.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]

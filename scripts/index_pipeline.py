@@ -82,8 +82,9 @@ def refresh(root, kind, **kwargs):
 # oltre questi chunk da rifare l'indice si ricostruisce su chiavi nuove invece che in un'unica transazione
 REBUILD_CHUNKS = 3000
 
-# tetto ai caratteri di una richiesta di embedding, oltre ai batch_size chunk
-MAX_BATCH_CHARS = 200_000
+# tetto ai caratteri di una richiesta di embedding, oltre ai batch_size chunk: sotto il
+# limite di token di Nebius (qwen3-embedding-8b) una richiesta troppo grande ha 429 per sempre
+MAX_BATCH_CHARS = 50_000
 
 
 def _batches(staged, batch_size):
@@ -108,7 +109,7 @@ def _chunk_json(scope, path, chunk, info):
                        "content_sha": hashlib.sha256(chunk["content"].encode()).hexdigest(), "rev": info["hash"]})
 
 
-def _refresh(root, kind, force=False, limit=None, include_sessions=False, single=None, batch_size=64, verbose=False, expected_snapshot=None, expected_fingerprint=None):
+def _refresh(root, kind, force=False, limit=None, include_sessions=False, single=None, batch_size=32, verbose=False, expected_snapshot=None, expected_fingerprint=None):
     root = Path(root).resolve()
     directory = root / ".raidhowiki"
     if directory.is_symlink() or not directory.resolve().is_relative_to(root):

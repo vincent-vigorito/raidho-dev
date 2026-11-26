@@ -206,3 +206,37 @@ s = jobs.status(root)
 assert s['counts'] == {'pending':1}, s
 assert s['jobs'][0]['snapshot'] == jobs.snapshot(page)
 ''')
+
+
+def test_job_rimandato_durante_la_ricostruzione_poi_pubblicato(tmp_path):
+    run(tmp_path, r'''
+import time
+import wiki_jobs as jobs
+idx = code_db.open_db(root / '.raidhowiki', dim=p.dim, allow_dimension_mismatch=True)
+page.write_text(page.read_text() + 'nuova revisione\n')
+lock = code_db.prendi_lock(idx, 'ricostruzione')
+generazione = idx.meta().get('index_generation')
+job = jobs.enqueue(root, page, start=False)
+db = jobs.connect(root)
+
+def esegui():
+    db.execute("UPDATE jobs SET state='running',attempts=attempts+1 WHERE id=?", (job,))
+    db.commit()
+    row = dict(db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone())
+    r = jobs.run_job(root, row)
+    jobs.finish(db, job, row['attempts'], r)
+    return r, dict(db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone())
+
+r, row = esegui()
+assert r['status'] == 'deferred', r
+assert (row['state'], row['attempts']) == ('retry', 0), row
+assert row['next_attempt'] > time.time() + 20, row
+assert idx.meta().get('index_generation') == generazione
+assert not any('nuova revisione' in c[5] for c in contents()['chunks'])
+code_db.lascia_lock(idx, lock)
+r, row = esegui()
+assert r['status'] == 'partial' and not r.get('error'), r
+assert (row['state'], row['attempts']) == ('done', 1), row
+assert any('nuova revisione' in c[5] for c in contents()['chunks'])
+db.close()
+''')

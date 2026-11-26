@@ -328,6 +328,18 @@ def prendi_lock(idx: Index, cosa: str, durata: int = 6 * 3600) -> Optional[str]:
     return None
 
 
+def lock_attivo(idx: Index) -> bool:
+    """True se il lock delle chiavi :new:* e' di un processo vivo: ricostruzione o import in corso."""
+    chi = _s(idx.r.get(idx.k("lock"))) or ""
+    try:
+        os.kill(int(chi.split(":")[0]), 0)
+    except PermissionError:
+        return True
+    except (ValueError, ProcessLookupError):
+        return False
+    return True
+
+
 def lascia_lock(idx: Index, valore: str) -> None:
     if _s(idx.r.get(idx.k("lock"))) == valore:
         idx.r.delete(idx.k("lock"))

@@ -19,6 +19,8 @@ import embed_providers
 
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 300
+# ricostruzione dell'indice in corso: ogni quanto si riprova il job rimandato
+DEFERRED_SECONDS = 30
 
 
 def connect(root):
@@ -128,6 +130,12 @@ def run_job(root, job):
 
 def finish(db, job_id, attempts, outcome):
     state = outcome.get('status')
+    if state == 'deferred':
+        # non consuma tentativi: riparte appena la ricostruzione lascia il lock
+        db.execute("UPDATE jobs SET state='retry',attempts=attempts-1,lease_until=NULL,next_attempt=?,error=?,updated=? WHERE id=? AND state='running'",
+                   (time.time() + DEFERRED_SECONDS, outcome.get('error'), time.time(), job_id))
+        db.commit()
+        return
     if state in ('ready', 'partial') and not outcome.get('error'):
         state = 'done'
     elif state in ('stale', 'superseded'):

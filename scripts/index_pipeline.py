@@ -135,6 +135,9 @@ def _refresh(root, kind, force=False, limit=None, include_sessions=False, single
         if not isinstance(provider.dim, int) or provider.dim <= 0:
             raise ValueError("invalid provider dimension")
         idx = code_db.open_db(directory, dim=provider.dim, allow_dimension_mismatch=True)
+        if kind == "wiki" and code_db.lock_attivo(idx):
+            # una pubblicazione della wiki farebbe rifare da capo la ricostruzione in corso
+            return {"status": "deferred", "error": "index rebuild running; wiki run deferred", "code": "index_rebuild_running"}
         meta = idx.meta()
         generation = meta.get("index_generation") or "0"
         old_fp = meta.get("index_fingerprint")
